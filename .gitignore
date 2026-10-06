@@ -1,0 +1,12 @@
+.build/
+*.app
+build/
+# working files, not for the public repo
+docs/mockup.*
+docs/shots/
+KANBAN.md
+.DS_Store
+# the promo video and its source stay local
+promo/
+docs/promo/
+docs/RESEARCH.md
