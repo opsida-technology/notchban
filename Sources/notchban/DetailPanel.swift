@@ -25,7 +25,8 @@ struct DetailPanel: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Text(Format.markdown(card.title)).font(.system(size: 18, weight: .semibold)).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                    if card.track ?? card.phase ?? card.tier != nil || card.size ?? card.risk ?? card.gate != nil { facts }
+                    if card.track ?? card.phase ?? card.tier != nil || card.size ?? card.risk ?? card.gate ?? card.source ?? card.due != nil { facts }
+                    if card.column == .review, let needs = card.needs { needsBlock(needs) }
                     if let owner = card.owner { ownerBlock(owner) }
                     if let blocker = card.blocker {
                         Callout(icon: "exclamationmark.octagon.fill", tint: Theme.alarm, title: "Blocked") { Text(Format.markdown(blocker)) }
@@ -37,12 +38,15 @@ struct DetailPanel: View {
                     }
                     dependencies
                     if !card.checklist.isEmpty { checklist }
-                    if !card.notes.isEmpty {
+                    let notes = card.notes.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.hasPrefix("Needs:") }.joined(separator: "\n")
+                    if !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         PanelSection(title: "Notes") {
-                            Text(Format.markdown(Format.unwrap(card.notes))).font(.system(size: 12.5)).lineSpacing(2.5)
+                            Text(Format.markdown(Format.unwrap(notes))).font(.system(size: 12.5)).lineSpacing(2.5)
                                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    if card.column == .review { verdicts }
+                    actions
                     footer
                 }
                 .padding(.horizontal, 18).padding(.bottom, 18)
@@ -59,15 +63,33 @@ struct DetailPanel: View {
     }
 
     private var facts: some View {
+        let due = card.column == .review ? card.due.map { Format.due($0, now: model.now) } : nil
         let items: [(String, String, Color)] = [
-            card.track.map { ("Track \($0)", "point.3.connected.trianglepath.dotted", Theme.track($0) ?? .secondary) },
+            due.map { ($0.text, "calendar", $0.late ? Theme.alarm : .secondary) },
+            card.track.map { (Format.track($0), "point.3.connected.trianglepath.dotted", Theme.track($0) ?? .secondary) },
             card.phase.map { ("Phase \($0)", "flag", .secondary) },
             card.size.map { ("Size \($0)", "ruler", .secondary) },
             card.risk.map { ("Risk \($0)", "shield.lefthalf.filled", $0 == "none" ? .secondary : Theme.alarm) },
             card.tier.map { ("Tier \($0)", "square.stack.3d.up", .secondary) },
             card.gate.map { ("Gate \($0)\(graph.gateOpen(card) ? " · open" : " · closed")", graph.gateOpen(card) ? "lock.open" : "lock.fill", .secondary) },
         ].compactMap { $0 }
-        return FlowLayout { ForEach(items, id: \.0) { Chip(text: $0.0, icon: $0.1, tint: $0.2) } }
+        return FlowLayout {
+            if card.isHumanEntered { HumanChip() }
+            ForEach(items, id: \.0) { Chip(text: $0.0, icon: $0.1, tint: $0.2) }
+        }
+    }
+
+    /// What the agent needs from the owner, in the notch's black: black is the owner's.
+    private func needsBlock(_ needs: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("NEEDS YOU TO").font(.system(size: 9.5, weight: .bold)).tracking(0.8).foregroundStyle(.white.opacity(0.6))
+            Text(Format.markdown(needs)).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.white)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.black)
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.14))))
+        .accessibilityElement(children: .combine)
     }
 
     private func ownerBlock(_ owner: String) -> some View {
@@ -142,11 +164,77 @@ struct DetailPanel: View {
         }
     }
 
+    /// The owner's verdict on a Human Review card; each button says where the card goes.
+    private var verdicts: some View {
+        let items: [(Verdict, String, String, String, Color)] = [
+            (.done, "Done", "Finished. Goes to Done.", "checkmark", Theme.good),
+            (.approved, "Approve", "Go ahead. Back to Ready.", "arrow.right", Theme.indigo),
+            (.changes, "Changes…", "Say what to fix. Back to Ready.", "pencil", Theme.critical),
+            (.hold, "Hold…", "Say why. Goes to Blocked.", "pause.fill", Theme.alarm),
+        ]
+        return PanelSection(title: "Your verdict") {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())], spacing: 8) {
+                ForEach(items, id: \.0) { item in
+                    Button { review(item.0) } label: {
+                        HStack(spacing: 9) {
+                            Image(systemName: item.3).font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+                                .frame(width: 28, height: 28).background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(item.4))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.1).font(.system(size: 12.5, weight: .semibold))
+                                Text(item.2).font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(item.4.opacity(0.13)))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(item.1.replacingOccurrences(of: "…", with: "")): \(item.2)")
+                }
+            }
+        }
+    }
+
+    private func review(_ verdict: Verdict) {
+        var note = ""
+        if verdict.needsNote {
+            let ask = verdict == .hold ? ("Hold \(card.id)", "Say why. It becomes the card's blocker.") : ("Changes to \(card.id)", "Say what to fix. The agent reads it when it picks the card up.")
+            guard let text = model.ask(ask.0, ask.1, button: verdict == .hold ? "Hold" : "Send back") else { return }
+            note = text
+        }
+        model.perform(.review(board: board.path, card: card.id, verdict: verdict, note: note))
+    }
+
+    /// Add a note (any card) and set the review day (Human Review), drawn like fields to type into.
+    private var actions: some View {
+        HStack(spacing: 8) {
+            outlined("Add note…", "square.and.pencil") {
+                if let text = model.ask("Note on \(card.id)", "Signed with your name and today's date.", button: "Add") {
+                    model.perform(.note(board: board.path, card: card.id, text: text))
+                }
+            }
+            if card.column == .review { outlined("Review by…", "calendar") { model.askDue(board, card) }.fixedSize() }
+        }
+    }
+
+    private func outlined(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon).font(.system(size: 12)).foregroundStyle(.secondary)
+                .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.cardStroke, lineWidth: 1)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.well)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var footer: some View {
-        HStack(spacing: 12) {
-            Button { NSWorkspace.shared.open(URL(fileURLWithPath: board.path)) } label: { Label("Open KANBAN.md", systemImage: "doc.text") }
-            Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: board.path)]) } label: { Label("Reveal", systemImage: "folder") }
-            Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button { NSWorkspace.shared.open(URL(fileURLWithPath: board.path)) } label: { Label("Open KANBAN.md", systemImage: "doc.text") }
+                Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: board.path)]) } label: { Label("Reveal", systemImage: "folder") }
+            }
         }
         .buttonStyle(.link).font(.system(size: 11.5))
     }

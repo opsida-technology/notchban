@@ -123,14 +123,11 @@ struct ColumnHeader: View {
                 .contentShape(Rectangle())
             } else {
                 HStack(spacing: 7) {
-                    Image(systemName: Theme.columnIcon(column)).font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.column(column))
+                    RoundedRectangle(cornerRadius: 2.5).fill(Theme.column(column)).frame(width: 8, height: 8)
                     Text(column.rawValue).font(.system(size: 12.5, weight: .semibold))
                     Text(count == total ? "\(total)" : "\(count) of \(total)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .rounded).monospacedDigit())
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6).padding(.vertical, 1.5)
-                        .background(Capsule().fill(Theme.well))
                     Spacer()
                 }
                 .frame(height: 28)
@@ -186,7 +183,7 @@ struct LaneView: View {
                     .frame(width: w, alignment: .top)
                     .frame(minHeight: 60, alignment: .top)
                     .padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.well).padding(-6))
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(w > BoardScreen.collapsedWidth ? .clear : Theme.well).padding(-6))
                 }
             }
         }

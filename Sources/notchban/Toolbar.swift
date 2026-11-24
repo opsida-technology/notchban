@@ -33,9 +33,8 @@ struct Toolbar: View {
             .padding(.horizontal, 16)
             .frame(height: 46)
         }
-        .background(LinearGradient(colors: [.black, Theme.ink], startPoint: .top, endPoint: .bottom))  // the notch's black, deepening into ink
+        .background(LinearGradient(colors: [Theme.band, Theme.canvas], startPoint: .top, endPoint: .bottom))  // the notch's black deepening into ink; paper in the light
         .overlay(alignment: .bottom) { LinearGradient(colors: [Theme.upstream.opacity(0), Theme.upstream.opacity(0.35), Theme.good.opacity(0.35), Theme.good.opacity(0)], startPoint: .leading, endPoint: .trailing).frame(height: 1) }
-        .environment(\.colorScheme, .dark)
         .onChange(of: state.focusSearch) { searching = $0 }
         .onChange(of: searching) { state.focusSearch = $0 }
     }
@@ -44,18 +43,20 @@ struct Toolbar: View {
         Menu {
             ForEach(model.boards) { b in
                 Button { state.show(b.path) } label: {
-                    Text("\(b.name)   \(b.count(.progress)) active · \(b.count(.blocked)) blocked · \(b.cards.count) cards")
+                    Text("\(b.displayName)   \(b.count(.progress)) active · \(b.count(.blocked)) blocked · \(b.cards.count) cards")
                 }
             }
             Divider()
+            Button("Rename \(board.displayName)…") { model.rename(board) }
             Button("Boards Folder: \((model.root.path as NSString).abbreviatingWithTildeInPath)…") { model.chooseRoot() }
+            Button("Pair iPhone…") { (NSApp.delegate as? Delegate)?.pairing.showWindow() }
             Toggle("Claude Limits from Anthropic", isOn: Binding(get: { model.claudeEndpoint }, set: { model.setClaudeEndpoint($0) }))
             Divider()
             Button("Quit Notchban") { NSApp.terminate(nil) }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "square.grid.3x1.below.line.grid.1x2").foregroundStyle(.secondary)
-                Text(board.name).font(.system(size: 16, weight: .bold))
+                Text(board.displayName).font(.system(size: 16, weight: .bold))
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
             }
         }
@@ -103,8 +104,8 @@ struct Toolbar: View {
             FilterMenu(title: "Owner", icon: "person.crop.circle", value: state.filter.owner.map(Format.owner),
                        options: owners.map { ($0, Format.owner($0)) }) { state.filter.owner = $0 }
             if !tracks.isEmpty {
-                FilterMenu(title: "Track", icon: "point.3.connected.trianglepath.dotted", value: state.filter.track.map { "Track \($0)" },
-                           options: tracks.map { ($0, "Track \($0)") }) { state.filter.track = $0 }
+                FilterMenu(title: "Track", icon: "point.3.connected.trianglepath.dotted", value: state.filter.track.map(Format.track),
+                           options: tracks.map { ($0, Format.track($0)) }) { state.filter.track = $0 }
             }
             if !risks.isEmpty {
                 FilterMenu(title: "Risk", icon: "shield.lefthalf.filled", value: state.filter.risk,

@@ -97,15 +97,15 @@ struct PaletteView: View {
         ]
         for (title, icon, action) in commands { add(Item(id: "cmd:" + title, icon: icon, tint: .secondary, title: title, detail: "Command", run: action), title, bonus: 30) }
         for b in model.boards {
-            add(Item(id: "board:" + b.path, icon: "square.grid.3x1.below.line.grid.1x2", tint: .accentColor, title: b.name,
-                     detail: "\(b.cards.count) cards · board", run: { state.show(b.path) }), b.name, bonus: 20)
+            add(Item(id: "board:" + b.path, icon: "square.grid.3x1.below.line.grid.1x2", tint: .accentColor, title: b.displayName,
+                     detail: "\(b.cards.count) cards · board", run: { state.show(b.path) }), b.displayName + " " + b.name, bonus: 20)
         }
         if !query.isEmpty {
             for b in model.boards {
                 for card in b.cards {
                     let here = b.path == board.path
                     add(Item(id: b.path + "#" + card.id, icon: Theme.columnIcon(card.column), tint: Theme.column(card.column),
-                             title: "\(card.id)  \(card.title)", detail: here ? card.column.rawValue : "\(b.name) · \(card.column.rawValue)",
+                             title: "\(card.id)  \(card.title)", detail: here ? card.column.rawValue : "\(b.displayName) · \(card.column.rawValue)",
                              run: { state.show(b.path); state.selection = card.id; state.detail = true }),
                         "\(card.id) \(card.title)", bonus: here ? 10 : 0)
                 }

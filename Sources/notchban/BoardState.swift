@@ -55,11 +55,12 @@ final class BoardState: ObservableObject {
         case .status:
             return [lane("all", nil, nil, visible)]
         case .track, .phase:
-            let key: (Card) -> Int? = grouping == .track ? { $0.track } : { $0.phase }
+            let key: (Card) -> String? = grouping == .track ? { $0.track } : { $0.phase.map(String.init) }
             let groups = Dictionary(grouping: visible, by: key)
-            return groups.keys.sorted { ($0 ?? .max) < ($1 ?? .max) }.map { k in
-                let name = k.map { "\(grouping.rawValue) \($0)" } ?? "No \(grouping.rawValue.lowercased())"
-                return lane("\(grouping.rawValue)-\(k ?? -1)", name, Theme.track(k), groups[k] ?? [])
+            // numbers in order, names after them, cards without one last
+            return groups.keys.sorted { a, b in b == nil ? a != nil : a.map { $0.localizedStandardCompare(b!) == .orderedAscending } ?? false }.map { k in
+                let name = k.map { grouping == .track ? Format.track($0) : "Phase \($0)" } ?? "No \(grouping.rawValue.lowercased())"
+                return lane("\(grouping.rawValue)-\(k ?? "")", name, Theme.track(k), groups[k] ?? [])
             }
         }
     }

@@ -89,7 +89,7 @@ final class GraphTests: XCTestCase {
         XCTAssertEqual(ids(f), ["G"])
         f = CardFilter(); f.text = "midd"
         XCTAssertEqual(ids(f), ["B"])
-        f = CardFilter(); f.track = 2; f.risk = "sec"; f.owner = "agent:x"
+        f = CardFilter(); f.track = "2"; f.risk = "sec"; f.owner = "agent:x"
         XCTAssertEqual(ids(f), ["G"])
     }
 

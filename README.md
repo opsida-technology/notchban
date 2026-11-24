@@ -2,7 +2,7 @@
 
 A kanban board that lives in your Mac's notch, for people who run coding agents.
 It shows every `KANBAN.md` in your projects folder and who is working on what: Claude Code and Codex
-sessions, their subagents, their 5-hour and weekly limits. Read-only; it never writes a board.
+sessions, their subagents, their 5-hour and weekly limits. It writes a board only when you act on it yourself.
 
 **[Download the latest release](https://github.com/opsida-technology/notchban/releases/latest)**: unzip, move
 `Notchban.app` to Applications, open it. macOS 13 or later, Apple silicon.
@@ -94,12 +94,15 @@ offers to install it the first time the board opens, so your agents keep the boa
 
 ## Where the data comes from
 
-Everything is read on your Mac, and nothing is written except where the app asks first.
+Everything is read on your Mac, and nothing is written except where the app asks first or you act on a board
+yourself: a review, a note or a new card goes into that board's `KANBAN.md` as plain lines, uncommitted; a name you
+give a board stays in the app's settings.
 
 - **Boards**: every `KANBAN.md` up to three folders deep under your projects folder, which the app asks for the first
   time the board opens (`~/development` until then). Change it later from the board
-  switcher's menu ("Boards Folder…"). A repository's board is read from `origin/main`, fetched every minute, so a
-  push from another machine shows at once.
+  switcher's menu ("Boards Folder…"). A repository's board is its trunk checkout's
+  `KANBAN.md` as it is on the disk, pushed or not; a worktree's copy counts only when the trunk has none. The app
+  runs no git command.
 - **Codex**: limits and sessions from `~/.codex/sessions`.
 - **Claude Code**: sessions from `~/.claude/sessions` and their `subagents/` folders. Claude Code hands its
   limits only to a status line command, so the app offers to add one that saves them to a file. It asks first,

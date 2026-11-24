@@ -3,7 +3,8 @@ import PackageDescription
 
 let package = Package(
     name: "notchban",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v13), .iOS(.v17)],
+    products: [.library(name: "NotchbanCore", targets: ["NotchbanCore"])],
     targets: [
         .target(name: "NotchbanCore"),
         .executableTarget(name: "notchban", dependencies: ["NotchbanCore"]),

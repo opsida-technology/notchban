@@ -4,7 +4,7 @@ import Foundation
 public struct CardFilter: Equatable, Sendable {
     public var text = ""
     public var owner: String?
-    public var track: Int?
+    public var track: String?
     public var risk: String?
     /// Only cards someone can take now (`BoardGraph.isActionable`).
     public var actionable = false

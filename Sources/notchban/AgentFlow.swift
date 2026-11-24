@@ -109,7 +109,7 @@ struct AgentTree: View {
                             .background(Capsule().fill(Theme.upstream.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
-                        .help("Open \(link.card.id) on \(link.board.name)")
+                        .help("Open \(link.card.id) on \(link.board.displayName)")
                     }
                 }
             }

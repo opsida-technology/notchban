@@ -34,21 +34,20 @@ struct CardView: View {
         VStack(alignment: .leading, spacing: 7) {
             header
             Text(Format.markdown(card.title))
-                .font(.system(size: 12.5, weight: .medium))
+                .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(card.column == .done ? .secondary : .primary)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
             if let blocker = card.blocker, card.column == .blocked {
-                Label { Text(Format.markdown(blocker)).lineLimit(2) } icon: { Image(systemName: "exclamationmark.octagon.fill") }
+                Text(Format.markdown(blocker)).lineLimit(2)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Theme.alarm)
             }
             footer
         }
-        .padding(.leading, 13).padding([.trailing, .vertical], 10)
+        .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(background)
-        .overlay(alignment: .leading) { stripe }
         .overlay(alignment: .topTrailing) { criticalBadge }
         .opacity(role == .dimmed ? 0.3 : 1)
         .scaleEffect(role == .selected ? 1.025 : hover ? 1.01 : 1)
@@ -62,77 +61,78 @@ struct CardView: View {
         .accessibilityAddTraits(role == .selected ? [.isButton, .isSelected] : .isButton)
     }
 
+    /// The design's card: id and the owner's chip on top, the lease at the top right; tags below, and on the right
+    /// what matters most for this column (review day, owner, what it waits for, or that the owner typed it in).
     private var header: some View {
         HStack(spacing: 5) {
             Text(card.id)
-                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary).lineLimit(1).fixedSize()
             if gated {
                 Image(systemName: "lock.fill").font(.system(size: 8.5)).foregroundStyle(.tertiary)
                     .help("Gated: waits for every Tier 0 card")
             }
+            if card.isHumanEntered { HumanChip() }
             Spacer(minLength: 4)
-            card.riskChip()
-            if let size = card.size { Chip(text: size) }
+            if card.column == .progress {
+                Label(Format.lease(card.leaseExpires, now: now), systemImage: stale ? "bell.badge.fill" : "clock")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(stale ? Theme.alarm : Theme.good)
+                    .lineLimit(1).fixedSize()
+            } else {
+                card.riskChip()
+            }
         }
+        .labelStyle(TightLabel())
     }
 
-    @ViewBuilder private var footer: some View {
-        let hasLease = card.column == .progress
-        if card.owner != nil || waits > 0 || unlocks > 0 || card.total > 0 || hasLease {
-            HStack(spacing: 8) {
-                if let owner = card.owner {
-                    HStack(spacing: 5) {
-                        Avatar(owner: owner, size: 17)
-                        if !hasLease { Text(Format.owner(owner)).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1) }
-                    }
-                }
-                if hasLease {
-                    Label(Format.lease(card.leaseExpires, now: now),
-                          systemImage: stale ? "bell.badge.fill" : "timer")
-                        .font(.system(size: 10, weight: stale ? .bold : .medium))
-                        .foregroundStyle(stale ? Theme.alarm : .secondary)
-                        .lineLimit(1)
-                }
-                if waits > 0 {
-                    Label("\(waits)", systemImage: "hourglass")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.upstream)
-                        .help("Waits for \(waits) open card\(waits == 1 ? "" : "s")")
-                }
-                if unlocks > 0 {
-                    Label("\(unlocks)", systemImage: "arrow.turn.down.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.downstream)
-                        .help("Unlocks \(unlocks) card\(unlocks == 1 ? "" : "s")")
-                }
-                Spacer(minLength: 0)
-                if card.total > 0 {
-                    HStack(spacing: 4) {
-                        Text("\(card.checked)/\(card.total)")
-                            .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        Ring(done: card.checked, total: card.total)
-                    }
-                }
+    private var footer: some View {
+        HStack(spacing: 5) {
+            if let track = card.track { Chip(text: Format.track(track)).fixedSize() }
+            if let size = card.size { Chip(text: size).fixedSize() }
+            if unlocks > 0 {
+                Label("\(unlocks)", systemImage: "arrow.turn.down.right")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.downstream)
+                    .help("Unlocks \(unlocks) card\(unlocks == 1 ? "" : "s")")
             }
-            .labelStyle(TightLabel())
+            Spacer(minLength: 4)
+            trailing.font(.system(size: 10, weight: .medium)).lineLimit(1)
+        }
+        .labelStyle(TightLabel())
+    }
+
+    @ViewBuilder private var trailing: some View {
+        if card.column == .review, let day = card.due {
+            let due = Format.due(day, now: now)
+            Label(due.text, systemImage: "calendar").fontWeight(.semibold)
+                .foregroundStyle(due.late ? Theme.alarm : Theme.lavender)
+        } else if let owner = card.owner {
+            HStack(spacing: 4) {
+                Avatar(owner: owner, size: 15)
+                Text(Format.owner(owner)).foregroundStyle(.secondary)
+            }
+        } else if waits > 0 {
+            let first = graph.waitsFor(card.id).first ?? ""
+            Text(waits == 1 ? "after \(first)" : "after \(first) +\(waits - 1)").foregroundStyle(.secondary)
+                .help("Waits for \(waits) open card\(waits == 1 ? "" : "s")")
+        } else if card.isHumanEntered, card.column != .done {
+            Text("from you").foregroundStyle(.secondary)
+        } else if card.total > 0 {
+            HStack(spacing: 4) {
+                Text("\(card.checked)/\(card.total)").monospacedDigit().foregroundStyle(.secondary)
+                Ring(done: card.checked, total: card.total)
+            }
         }
     }
 
     private var background: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        let ring = stale ? Theme.alarm : role.ring
+        let ring = stale ? Theme.alarm : role == .selected ? Theme.column(card.column) : role.ring
         return shape.fill(Theme.card)
             .overlay(shape.strokeBorder(Theme.cardStroke, lineWidth: 0.5))
-            .overlay(shape.strokeBorder(ring ?? .clear, lineWidth: ring == nil ? 0 : (role == .selected ? 2 : 1.5)))
-            .shadow(color: (ring ?? .black).opacity(ring == nil ? (hover ? 0.12 : 0.06) : (stale && pulse ? 0.65 : 0.35)),
-                    radius: ring == nil ? (hover ? 8 : 3) : (stale && pulse ? 14 : 9), y: ring == nil ? 1.5 : 0)
-    }
-
-    private var stripe: some View {
-        let colour = Theme.track(card.track) ?? Theme.column(card.column)
-        return Capsule().fill(colour.gradient).frame(width: 3).padding(.vertical, 9).padding(.leading, 4)
+            .overlay(shape.strokeBorder(ring ?? .clear, lineWidth: ring == nil ? 0 : (role == .selected ? 2 : 1)))
+            .shadow(color: (ring ?? .black).opacity(ring == nil ? (hover ? 0.12 : 0.06) : (stale && pulse ? 0.45 : 0.18)),
+                    radius: ring == nil ? (hover ? 8 : 3) : (stale && pulse ? 10 : 5), y: ring == nil ? 1.5 : 0)
     }
 
     @ViewBuilder private var criticalBadge: some View {
@@ -148,6 +148,8 @@ struct CardView: View {
 
     private var accessibilityText: String {
         var parts = ["\(card.id), \(card.title)", card.column.rawValue]
+        if card.isHumanEntered { parts.append("human entered") }
+        if card.column == .review, let due = card.due { parts.append(Format.due(due, now: now).text) }
         if let owner = card.owner { parts.append("owner \(Format.owner(owner))") }
         if stale { parts.append("lease expired") }
         if let size = card.size { parts.append("size \(size)") }

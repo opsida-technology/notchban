@@ -10,26 +10,33 @@ enum Theme {
 
     /// The board's ground: deep ink with a teal cast in the dark, a pale mist of the same hue in the light.
     static let canvas = dynamic(light: NSColor(red: 0.925, green: 0.945, blue: 0.96, alpha: 1), dark: NSColor(red: 0.027, green: 0.047, blue: 0.086, alpha: 1))
-    /// The band under the notch (the toolbar), always dark: the notch's black flows into it.
-    static let ink = Color(red: 0.027, green: 0.047, blue: 0.086)
     static let card = dynamic(light: .white, dark: NSColor(red: 0.065, green: 0.095, blue: 0.16, alpha: 1))
     static let cardStroke = dynamic(light: NSColor(red: 0.05, green: 0.2, blue: 0.3, alpha: 0.1), dark: NSColor(red: 0.6, green: 0.85, blue: 1, alpha: 0.1))
     static let well = dynamic(light: NSColor(red: 0.05, green: 0.25, blue: 0.4, alpha: 0.05), dark: NSColor(red: 0.6, green: 0.85, blue: 1, alpha: 0.045))
-    // The logo's colours (indigo, sky, teal, mint) for flow; gold and ember only for what to watch, red only for alarm.
-    static let upstream = Color(red: 0.3, green: 0.72, blue: 1.0)  // sky
+    /// Under the notch: black in the dark (the notch flows into the toolbar), white paper in the light.
+    static let band = dynamic(light: .white, dark: .black)
+    // The logo's colours (indigo, sky, teal, mint) for flow; ember only for what to watch, red only for alarm.
+    // Each has a deeper light-mode shade so it reads as text on white (4.5:1).
+    static let upstream = rgb(light: (0.05, 0.45, 0.78), dark: (0.3, 0.72, 1.0))  // sky
     static let downstream = indigo
-    static let critical = Color(red: 1.0, green: 0.5, blue: 0.27)  // ember
-    static let good = Color(red: 0.25, green: 0.9, blue: 0.62)  // mint
-    static let indigo = Color(red: 0.4, green: 0.46, blue: 1.0)
-    static let teal = Color(red: 0.04, green: 0.78, blue: 0.75)
-    static let alarm = Color(red: 1.0, green: 0.33, blue: 0.32)
+    static let critical = rgb(light: (0.69, 0.27, 0.05), dark: (1.0, 0.5, 0.27))  // ember
+    static let good = rgb(light: (0.04, 0.46, 0.28), dark: (0.25, 0.9, 0.62))  // mint
+    static let indigo = rgb(light: (0.25, 0.31, 0.84), dark: (0.4, 0.46, 1.0))
+    static let teal = rgb(light: (0.03, 0.5, 0.48), dark: (0.04, 0.78, 0.75))
+    static let alarm = rgb(light: (0.75, 0.16, 0.15), dark: (1.0, 0.33, 0.32))
+    static let lavender = rgb(light: (0.35, 0.24, 0.85), dark: (0.64, 0.55, 1.0))
+    static let slate = rgb(light: (0.35, 0.4, 0.48), dark: (0.56, 0.6, 0.68))
+
+    private static func rgb(light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)) -> Color {
+        dynamic(light: NSColor(red: light.0, green: light.1, blue: light.2, alpha: 1), dark: NSColor(red: dark.0, green: dark.1, blue: dark.2, alpha: 1))
+    }
 
     static func column(_ c: Column) -> Color {
         switch c {
-        case .backlog: Color(red: 0.56, green: 0.6, blue: 0.68)
+        case .backlog: slate
         case .ready: indigo
         case .progress: upstream
-        case .review: Color(red: 0.64, green: 0.55, blue: 1)  // lavender
+        case .review: lavender
         case .verified: teal
         case .blocked: alarm
         case .done: good
@@ -50,18 +57,49 @@ enum Theme {
 
     static let tracks: [Color] = [
         upstream, teal, good, indigo,
-        Color(red: 0.64, green: 0.55, blue: 1), Color(red: 0.5, green: 0.8, blue: 1),
+        lavender, rgb(light: (0.1, 0.42, 0.62), dark: (0.5, 0.8, 1)),
     ]
-    static func track(_ n: Int?) -> Color? { n.map { tracks[(max($0, 1) - 1) % tracks.count] } }
+    /// Track 1 takes the first colour, 2 the second; a named track ("fark") a stable one.
+    static func track(_ key: String?) -> Color? {
+        key.map { key in tracks[(Int(key).map { max($0, 1) - 1 } ?? Int(stableHash(key))) % tracks.count] }
+    }
+
+    static func stableHash(_ s: String) -> UInt32 { s.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value } }
 
     /// A stable colour per owner (String.hashValue changes between launches).
     static func avatar(_ name: String) -> Color {
-        let hash = name.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value }
+        let hash = stableHash(name)
         return Color(hue: Double(150 + hash % 140) / 360, saturation: 0.5, brightness: 0.82)  // mint through violet, never pink
     }
 }
 
 enum Format {
+    /// "Track 2" for a numbered track, the name itself for a named one.
+    static func track(_ key: String) -> String { Int(key) == nil ? key : "Track \(key)" }
+
+    /// YYYY-MM-DD in this Mac's time zone, the form `due` is written in.
+    static func day(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+
+    /// The owner's review day in words: "review today", "review by Fri", "2 days late".
+    static func due(_ day: String, now: Date) -> (text: String, late: Bool) {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        guard let date = f.date(from: day) else { return ("review by \(day)", false) }
+        let calendar = Calendar.current
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: date).day ?? 0
+        switch days {
+        case ..<0: return ("\(-days) day\(days == -1 ? "" : "s") late", true)
+        case 0: return ("review today", false)
+        case 1: return ("review tomorrow", false)
+        case 2...6: return ("review by " + date.formatted(.dateTime.weekday(.abbreviated)), false)
+        default: return ("review by " + date.formatted(.dateTime.day().month(.abbreviated)), false)
+        }
+    }
+
     /// "agent:task-forgejo-move-2026-10-06" → "forgejo-move".
     static func owner(_ raw: String) -> String {
         var s = raw
@@ -149,6 +187,19 @@ struct Chip: View {
         .foregroundStyle(tint)
         .padding(.horizontal, 5).padding(.vertical, 2)
         .background(Capsule().fill(tint.opacity(0.13)))
+    }
+}
+
+/// The owner's own card (`"source": "human"`), drawn in the notch's black in both modes: black is the owner's.
+struct HumanChip: View {
+    var body: some View {
+        Label("Human Entered", systemImage: "person.fill")
+            .labelStyle(TightLabel())
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(.white).lineLimit(1).fixedSize()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(.black).overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 0.5)))
+            .help("Human Entered: you typed this card in")
     }
 }
 

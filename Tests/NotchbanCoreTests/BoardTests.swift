@@ -64,7 +64,8 @@ final class BoardTests: XCTestCase {
         let card = try XCTUnwrap(BoardParser.parse(rich, path: "/x/KANBAN.md")?.cards.first)
         XCTAssertEqual(card.title, "Move Forgejo — then deploy")
         XCTAssertEqual(card.column, .blocked)
-        XCTAssertEqual([card.track, card.phase, card.tier], [1, 2, 0])
+        XCTAssertEqual(card.track, "1")
+        XCTAssertEqual([card.phase, card.tier], [2, 0])
         XCTAssertEqual([card.size, card.risk, card.gate, card.owner], ["S–M", "sec", "tier0", "agent:h"])
         XCTAssertEqual(card.blocker, "Ada's yes.")
         XCTAssertEqual(card.proof, ["test:local-1", "`./tools/test.sh` — 1600/1600"])
@@ -91,7 +92,13 @@ final class WorktreeTests: XCTestCase {
         try board("A-2").write(to: tree.appendingPathComponent("KANBAN.md"), atomically: true, encoding: .utf8)
         let boards = Scanner.boards(under: root)
         XCTAssertEqual(boards.map(\.name), ["app"])
-        XCTAssertEqual(boards.first?.cards.map(\.id), ["A-2"], "the board written last is the live one")
+        XCTAssertEqual(boards.first?.cards.map(\.id), ["A-1"], "the trunk's copy is the board, however new a worktree's")
+    }
+
+    /// Boards name tracks ("fark") as often as they number them.
+    func testTrackIsNumberOrName() throws {
+        let text = "# Kanban\n\n## Ready\n\n### A-1 — x\n<!-- squawk:{\"track\":\"fark\"} -->\n\n### A-2 — y\n<!-- squawk:{\"track\":3} -->\n"
+        XCTAssertEqual(BoardParser.parse(text, path: "/x/KANBAN.md")?.cards.map(\.track), ["fark", "3"])
     }
 
     /// The skill the app installs must write boards the app reads: its empty board, with its example card in Ready.

@@ -1,17 +1,17 @@
 import Foundation
 
 /// The seven columns of a `KANBAN.md` (Squawk format, `<!-- squawk-kanban:v1 -->`).
-public enum Column: String, CaseIterable, Sendable {
+public enum Column: String, CaseIterable, Codable, Sendable {
     case backlog = "Backlog", ready = "Ready", progress = "In Progress", review = "Human Review"
     case verified = "Verified", blocked = "Blocked", done = "Done"
 }
 
-public struct ChecklistItem: Equatable, Sendable {
+public struct ChecklistItem: Equatable, Codable, Sendable {
     public let text: String
     public let done: Bool
 }
 
-public struct Card: Identifiable, Equatable, Sendable {
+public struct Card: Identifiable, Equatable, Codable, Sendable {
     public let id: String
     public let title: String
     public let column: Column
@@ -22,18 +22,30 @@ public struct Card: Identifiable, Equatable, Sendable {
     public var before: [String] = []
     public var checklist: [ChecklistItem] = []
     /// Our extensions of the Squawk metadata line.
-    public var track: Int? = nil
+    public var track: String? = nil
     public var phase: Int? = nil
     public var size: String? = nil
     public var risk: String? = nil
     public var tier: Int? = nil
     public var gate: String? = nil
+    /// `"source": "human"`: the owner typed this card in (Human Entered), not an agent.
+    public var source: String? = nil
+    /// `"due": "YYYY-MM-DD"`: when the owner should have reviewed a Human Review card.
+    public var due: String? = nil
     /// `Proof: …` lines and the metadata's `proofs` ids.
     public var proof: [String] = []
     /// `Blocker: …`: why a card cannot move.
     public var blocker: String? = nil
     /// Everything else under the heading, as written.
     public var notes: String = ""
+
+    public var isHumanEntered: Bool { source == "human" }
+    /// What the owner must do, from the last `Needs:` line an agent wrote into the notes.
+    public var needs: String? {
+        notes.split(separator: "\n").last { $0.hasPrefix("Needs:") }.map { $0.dropFirst(6).trimmingCharacters(in: .whitespaces) }
+    }
+    /// A Human Review card past its review day (`today` as YYYY-MM-DD in the owner's time zone).
+    public func isOverdue(today: String) -> Bool { column == .review && due.map { $0 < today } ?? false }
 
     public var checked: Int { checklist.filter(\.done).count }
     public var total: Int { checklist.count }
@@ -51,15 +63,19 @@ public struct Card: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct Board: Identifiable, Equatable, Sendable {
+public struct Board: Identifiable, Equatable, Codable, Sendable {
     public var id: String { path }
     public let path: String
     public let name: String
     public let cards: [Card]
+    /// The name the owner gave the board; `name` stays the repository's folder.
+    public var title: String? = nil
 
     public init(path: String, name: String, cards: [Card]) {
         self.path = path; self.name = name; self.cards = cards
     }
+
+    public var displayName: String { title ?? name }
 
     public func count(_ column: Column) -> Int { cards.filter { $0.column == column }.count }
     public func card(_ id: String) -> Card? { cards.first { $0.id == id } }
@@ -132,12 +148,14 @@ public enum BoardParser {
         card.leaseExpires = (lease?["expiresAt"] as? String).flatMap(ISO8601DateFormatter().date)
         card.after = meta["after"] as? [String] ?? []
         card.before = meta["before"] as? [String] ?? []
-        card.track = int("track")
+        card.track = meta["track"] as? String ?? (meta["track"] as? Int).map(String.init)
         card.phase = int("phase")
         card.tier = int("tier")
         card.size = meta["size"] as? String
         card.risk = meta["risk"] as? String
         card.gate = meta["gate"] as? String
+        card.source = meta["source"] as? String
+        card.due = meta["due"] as? String
         card.proof += meta["proofs"] as? [String] ?? []
     }
 }

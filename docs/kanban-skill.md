@@ -51,11 +51,34 @@ Proof: test name, log id or PR link
 - The containing `##` section is the status; never duplicate it in metadata.
 - Metadata is one valid JSON line. No token, credential, transcript or large output in the board.
 - Optional metadata a repo may add (keep what it uses): `after` (predecessor ids that must be Done first),
-  `before` (successor ids), `track`, `phase`, `size`, `risk`, `gate`, `proofs`. Keep `after` and `before` mirrored:
-  if A is after B, B lists A in `before`. No cycles.
+  `before` (successor ids), `track` (a number or a name), `phase`, `size` (`S`/`M`/`L`: the critical path
+  weighs by it, so give new cards one), `risk`, `gate`, `proofs`; `source` and `due` are the owner's (below).
+  Keep `after` and `before` mirrored: if A is after B, B lists A in `before`. No cycles.
 - Non-checklist, non-metadata lines are notes: short and factual; wrapped lines join, a blank line starts a paragraph.
 - A claim carries a two-hour ISO-8601 lease; renew it in long work. An active lease owned by another task is a hard
   conflict: do not move or overwrite that card. An expired lease means the card is free to claim.
+
+## The owner's cards and reviews
+
+The owner works the board from the board app (notchban, on the Mac and the phone). Its edits are ordinary lines
+in `KANBAN.md`; read them and keep them.
+
+- `"source":"human"` marks a card the owner typed in (shown as Human Entered). It is the owner's request: keep its
+  title and notes as written and add yours below them; do not delete, merge or reword it without asking.
+- Moving a card to `Human Review`: release the lease (drop `owner`, `task`, `lease`), end the card with one line
+  `Needs: <what the owner must do, in one sentence>`, and set `"due":"YYYY-MM-DD"`, the day the owner should have
+  looked: the next working day when other cards wait for it (`before`) or a release or a customer does, otherwise
+  three working days on.
+- The owner's verdict comes back as `Review (Name, YYYY-MM-DD): <verdict> — <note>`, and the app has already moved
+  the card:
+  - `done`: checked and finished, the card is in `Done`.
+  - `approved`: the gated step may go ahead (merge, deploy, send); the card is back in `Ready`.
+  - `changes`: fix what the note says, then send it to `Human Review` again; the card is back in `Ready`.
+  - `hold`: parked; the note is its `Blocker:` line and the card is in `Blocked`.
+- `Note (Name, YYYY-MM-DD): …` lines are the owner's notes on any card. Before you work a card, read its last
+  `Review` and `Note` lines and act on them; never delete them.
+- The app writes these lines into the trunk's `KANBAN.md` without committing; commit them with your next board
+  change, never revert them.
 
 ## Work protocol
 
@@ -63,12 +86,12 @@ Proof: test name, log id or PR link
   `owner`, `task` and a lease, before any work.
 - Keep the checklist current as you go. Scope discovered mid-task goes on the same card only when its acceptance
   needs it; otherwise create a new card (next free id) with its own `after`/`before`.
-- External dependency or a decision only a human can make: move to `Blocked`, write the concrete blocker and the
-  human action expected, and release the lease.
+- External dependency or a decision only a human can make: move to `Blocked`, add one line
+  `Blocker: <what blocks> → <the human action expected>`, and release the lease.
 - Claim before you start work, and make the claim visible at once (commit it where others read the board). A board
   that is updated only when a PR merges is not live.
 - When the work is finished and its Proof is on the card, move it to `Done` yourself. A
-  card that still needs the human's hands or a decision goes to `Human Review` and the human moves it.
+  card that still needs the human's hands or a decision goes to `Human Review` (see above) and the human moves it.
 - Before every write, re-read `KANBAN.md`; if it changed since you read the card, merge deliberately and never
   overwrite another person's or agent's update.
 - A new task found while working goes onto the board the moment you see it, not into your head or a side file.
@@ -76,5 +99,5 @@ Proof: test name, log id or PR link
 ## Large boards
 
 Do not load the whole file. Find the card and its neighbours with `grep -n '^### ID'` and read a range; for
-dependencies read only the cards named in its `after` and `before`. The Mac app `notchban` shows every board
-under the projects folder you give it, read-only, with predecessors and successors.
+dependencies read only the cards named in its `after` and `before`. The board app `notchban` shows every board
+under the projects folder you give it with predecessors and successors, on the Mac and the phone.

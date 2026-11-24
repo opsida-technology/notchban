@@ -12,6 +12,7 @@ final class BoardPanel: NSPanel {
 final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = Model()
     let state = BoardState()
+    lazy var pairing = Pairing(model: model)
     var panel: NSPanel!
     var notch = CGSize(width: 200, height: 32)
     private var pending: DispatchWorkItem?
@@ -25,7 +26,6 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApp.appearance = NSAppearance(named: .darkAqua)  // the board is always the logo's ink, whatever the system looks like
         if let screen = NSScreen.main {
             notch.height = max(screen.safeAreaInsets.top, 24)
             if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
@@ -50,6 +50,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         set(expanded: false)
         panel.orderFrontRegardless()
         model.start()
+        pairing.start()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.model.reveal, self.panel.isKeyWindow, event.window === self.panel else { return event }
             let textFocused = self.panel.firstResponder is NSText

@@ -30,6 +30,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>LSUIElement</key><true/>
 <key>NSHumanReadableCopyright</key><string>2026 Özgün Kasap</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSLocalNetworkUsageDescription</key><string>Notchban sends your boards to your paired iPhone over Wi-Fi or Bluetooth, with no server in between.</string>
+<key>NSBonjourServices</key><array><string>_notchban._tcp</string><string>_notchban._udp</string></array>
 </dict></plist>
 PLIST
 if [[ -z "${NOTARY_PROFILE:-}" ]]; then
@@ -37,7 +39,8 @@ if [[ -z "${NOTARY_PROFILE:-}" ]]; then
   echo "$PWD/$app"
   exit
 fi
-identity=$(security find-identity -v -p codesigning | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+# always the company's Developer ID (owner ruling, 15 Nov 2026), never the personal one that sorts first
+identity=${SIGN_IDENTITY:-65F0D055F537AF8C394BC2AE56A3F44F621E041E}
 codesign --force --options runtime --timestamp --sign "$identity" "$app"
 zip=build/Notchban-${VERSION:-0.1.0}.zip
 rm -f "$zip"
