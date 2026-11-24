@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import MultipeerConnectivity
 import NotchbanCore
 import Security
@@ -27,9 +28,12 @@ final class Pairing: NSObject, ObservableObject {
         let name: String
         /// Came in with the pairing code: gets its token once connected.
         let pairing: Bool
-        /// The challenge a paired phone must answer in this session before anything else.
+        /// The challenge a paired phone must answer in this session before anything else, and the Mac's one-time key for it.
         var nonce: Data?
-        var ready = false
+        var ephemeral: Curve25519.KeyAgreement.PrivateKey?
+        /// Set once the phone answered: every message after that is sealed in it.
+        var channel: Channel?
+        var ready: Bool { channel != nil }
     }
 
     private let model: Model
@@ -191,24 +195,24 @@ final class Pairing: NSObject, ObservableObject {
                 }
                 tokens[link.device] = token
                 phones[link.device] = link.name
-                send(.paired(token: token), to: peer, in: link.session)
+                sendPlain(.paired(token: token), to: peer, in: link.session)
                 close("Paired with \(link.name).")
-                links[peer] = link
-                open(peer)
-            } else if let token = token(for: link.device) {
-                // The invitation proof is not tied to this session, so both ends prove the token again inside it.
-                let nonce = Wire.newNonce()
-                link.nonce = nonce
-                links[peer] = link
-                send(.challenge(nonce: nonce, proof: Wire.sessionProof(token: token, role: "mac", device: link.device, nonce: nonce)),
-                     to: peer, in: link.session)
-                let session = link.session
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-                    guard let self, let link = self.links[peer], link.session === session, !link.ready else { return }
-                    self.drop(peer)
-                }
-            } else {
-                drop(peer)
+            }
+            // The invitation proof is not tied to this session, so both ends prove the token again inside it, over
+            // one-time keys that become the session's own (see `Channel`).
+            guard let token = token(for: link.device) else { return drop(peer) }
+            let nonce = Wire.newNonce(), own = Curve25519.KeyAgreement.PrivateKey()
+            let key = own.publicKey.rawRepresentation
+            link.nonce = nonce
+            link.ephemeral = own
+            links[peer] = link
+            sendPlain(.challenge(nonce: nonce, key: key, proof: Wire.sessionProof(token: token, role: "mac", device: link.device,
+                                                                                  nonce: nonce, keys: key)),
+                      to: peer, in: link.session)
+            let session = link.session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, let link = self.links[peer], link.session === session, !link.ready else { return }
+                self.drop(peer)
             }
         case .notConnected:
             links[peer] = nil
@@ -221,14 +225,15 @@ final class Pairing: NSObject, ObservableObject {
         }
     }
 
-    /// The link checks out: it gets snapshots and may send commands.
-    private func open(_ peer: MCPeerID) {
+    /// The link checks out: it gets snapshots and may send commands, all sealed in `channel`.
+    private func open(_ peer: MCPeerID, _ channel: Channel) {
         guard var link = links[peer] else { return }
-        link.ready = true
+        link.channel = channel
         link.nonce = nil
+        link.ephemeral = nil
         links[peer] = link
         connected.insert(link.device)
-        send(.snapshot(boards: model.boards, at: Date()), to: peer, in: link.session)
+        send(.snapshot(boards: model.boards, at: Date()), to: peer)
     }
 
     private func drop(_ peer: MCPeerID) {
@@ -237,26 +242,46 @@ final class Pairing: NSObject, ObservableObject {
     }
 
     private func received(_ data: Data, from peer: MCPeerID, in session: MCSession) {
-        guard let link = links[peer], link.session === session, let message = try? WireMessage.decode(data) else { return }
-        if !link.ready {
-            guard case let .answer(proof) = message, let nonce = link.nonce, let token = token(for: link.device),
-                  Wire.verify(sessionProof: proof, token: token, role: "phone", device: link.device, nonce: nonce) else { return drop(peer) }
-            return open(peer)
+        guard var link = links[peer], link.session === session else { return }
+        guard var channel = link.channel else {
+            guard case let .answer(phoneKey, proof)? = try? WireMessage.decode(data), let nonce = link.nonce,
+                  let own = link.ephemeral, let token = token(for: link.device) else { return drop(peer) }
+            let macKey = own.publicKey.rawRepresentation
+            guard Wire.verify(sessionProof: proof, token: token, role: "phone", device: link.device, nonce: nonce, keys: macKey + phoneKey),
+                  let channel = try? Channel(role: "mac", own: own, mac: macKey, phone: phoneKey, token: token,
+                                             device: link.device, nonce: nonce) else { return drop(peer) }
+            return open(peer, channel)
         }
+        // anything that does not open as the next sealed message ends the link
+        guard let message = try? channel.open(data) else { return drop(peer) }
+        link.channel = channel
+        links[peer] = link
         guard case let .command(id, command) = message else { return }
         var added: String?, failure: String?
         do { added = try model.apply(command) } catch { failure = Self.sentence(error) }
-        send(.result(id: id, added: added, error: failure), to: peer, in: link.session)
+        send(.result(id: id, added: added, error: failure), to: peer)
     }
 
     private func broadcast() {
-        let ready = links.filter(\.value.ready)
-        guard !ready.isEmpty else { return }
         let message = WireMessage.snapshot(boards: model.boards, at: Date())
-        for (peer, link) in ready { send(message, to: peer, in: link.session) }
+        for peer in links.filter(\.value.ready).keys { send(message, to: peer) }
     }
 
-    private func send(_ message: WireMessage, to peer: MCPeerID, in session: MCSession) {
+    /// Sealed in the peer's channel; never sent before the handshake is done.
+    private func send(_ message: WireMessage, to peer: MCPeerID) {
+        guard var link = links[peer], var channel = link.channel else { return }
+        do {
+            let data = try channel.seal(message)
+            link.channel = channel
+            links[peer] = link
+            try link.session.send(data, toPeers: [peer], with: .reliable)
+        } catch {
+            NSLog("notchban: sending to %@ failed: %@", peer.displayName, error.localizedDescription)
+        }
+    }
+
+    /// The handshake's own messages, the only ones that travel unsealed.
+    private func sendPlain(_ message: WireMessage, to peer: MCPeerID, in session: MCSession) {
         do {
             try session.send(message.encoded(), toPeers: [peer], with: .reliable)
         } catch {
@@ -299,7 +324,8 @@ extension Pairing: MCSessionDelegate {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.received(data, from: peer, in: session) } }
     }
 
-    /// The encryption has no identity of its own; the token proof in the invitation is what lets a phone in.
+    /// The transport's encryption has no identity of its own. What lets a phone in is the token: proved in the invitation,
+    /// then again over this session's one-time keys, which seal everything after (see `Channel`).
     nonisolated func session(_ session: MCSession, didReceiveCertificate certificate: [Any]?, fromPeer peer: MCPeerID,
                              certificateHandler: @escaping (Bool) -> Void) {
         certificateHandler(true)

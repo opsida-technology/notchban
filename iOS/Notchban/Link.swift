@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MultipeerConnectivity
 import NotchbanCore
@@ -47,8 +48,8 @@ final class Link: NSObject, ObservableObject {
     /// The device id and Mac of a pairing in flight.
     private var pairing: (device: String, peer: MCPeerID)?
     private var waiting: [UUID: CheckedContinuation<Outcome, Never>] = [:]
-    /// This session's Mac proved the token (or just paired): only then are its snapshots and results taken.
-    private var trusted = false
+    /// Set once this session's Mac proved the token over its one-time key: snapshots and results come only sealed in it.
+    private var channel: Channel?
 
     private static let cache = URL.applicationSupportDirectory.appending(path: "snapshot.json")
 
@@ -100,7 +101,7 @@ final class Link: NSObject, ObservableObject {
         let s = MCSession(peer: me, securityIdentity: nil, encryptionPreference: .required)
         s.delegate = self
         session = s
-        trusted = false
+        channel = nil
         state = .connecting
         browser.invitePeer(peer, to: s, withContext: context, timeout: 20)
     }
@@ -117,9 +118,10 @@ final class Link: NSObject, ObservableObject {
     /// Sends a command and waits for the Mac's answer (at most 15 s).
     func run(_ command: BoardCommand) async -> Outcome {
         let id = UUID()
-        guard let session, isConnected, let message = try? WireMessage.command(id: id, command).encoded() else {
+        guard let session, isConnected, var channel, let message = try? channel.seal(.command(id: id, command)) else {
             return Outcome(error: "Your Mac isn't nearby. Try again when it is.")
         }
+        self.channel = channel
         do {
             try session.send(message, toPeers: session.connectedPeers, with: .reliable)
         } catch {
@@ -158,6 +160,7 @@ final class Link: NSObject, ObservableObject {
             state = .connecting
         case .notConnected:
             session = nil
+            channel = nil
             state = .searching
             for (_, c) in waiting { c.resume(returning: Outcome(error: "The link to your Mac dropped. Check the board before trying again.")) }
             waiting = [:]
@@ -173,15 +176,42 @@ final class Link: NSObject, ObservableObject {
     }
 
     private func received(_ data: Data, from peer: MCPeerID, in s: MCSession) {
-        guard s === session, let message = try? WireMessage.decode(data) else { return }
+        guard s === session else { return }
+        if var channel {
+            // anything that does not open as the Mac's next sealed message ends the link
+            guard let message = try? channel.open(data) else { return s.disconnect() }
+            self.channel = channel
+            switch message {
+            case let .snapshot(boards, at):
+                state = .connected
+                let fresh = Snapshot(boards: boards, at: at)
+                snapshot = fresh
+                if let data = try? JSONEncoder().encode(fresh) {
+                    try? FileManager.default.createDirectory(at: Self.cache.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? data.write(to: Self.cache, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                }
+            case let .result(id, added, error):
+                waiting.removeValue(forKey: id)?.resume(returning: Outcome(added: added, error: error))
+            default:
+                break
+            }
+            return
+        }
+        guard let message = try? WireMessage.decode(data) else { return }
         switch message {
-        case let .challenge(nonce, proof):
+        case let .challenge(nonce, macKey, proof):
+            // The Mac proves the token over its one-time key; the phone answers over both keys, and the two agree a
+            // channel no one relaying between them can read or change.
             guard let paired, pairing == nil,
-                  Wire.verify(sessionProof: proof, token: paired.token, role: "mac", device: paired.device, nonce: nonce),
-                  let answer = try? WireMessage.answer(proof: Wire.sessionProof(token: paired.token, role: "phone",
-                                                                                 device: paired.device, nonce: nonce)).encoded()
+                  Wire.verify(sessionProof: proof, token: paired.token, role: "mac", device: paired.device, nonce: nonce, keys: macKey)
             else { return s.disconnect() }
-            trusted = true
+            let own = Curve25519.KeyAgreement.PrivateKey(), phoneKey = own.publicKey.rawRepresentation
+            guard let channel = try? Channel(role: "phone", own: own, mac: macKey, phone: phoneKey, token: paired.token,
+                                             device: paired.device, nonce: nonce),
+                  let answer = try? WireMessage.answer(key: phoneKey, proof: Wire.sessionProof(
+                      token: paired.token, role: "phone", device: paired.device, nonce: nonce, keys: macKey + phoneKey)).encoded()
+            else { return s.disconnect() }
+            self.channel = channel
             try? s.send(answer, toPeers: [peer], with: .reliable)
         case let .paired(token):
             guard let pairing, pairing.peer == peer, let mac = macs[peer] else { return }
@@ -193,22 +223,10 @@ final class Link: NSObject, ObservableObject {
             }
             paired = record
             self.pairing = nil
-            trusted = true
             nearby = []
-        case let .snapshot(boards, at):
-            guard paired != nil, trusted else { return }
-            state = .connected
-            let fresh = Snapshot(boards: boards, at: at)
-            snapshot = fresh
-            if let data = try? JSONEncoder().encode(fresh) {
-                try? FileManager.default.createDirectory(at: Self.cache.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try? data.write(to: Self.cache, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            }
-        case let .result(id, added, error):
-            guard trusted else { return }
-            waiting.removeValue(forKey: id)?.resume(returning: Outcome(added: added, error: error))
-        case .command, .answer:
-            break
+            // the Mac's challenge follows at once, under the new token
+        default:
+            break  // nothing else is taken before the channel is set up
         }
     }
 }
