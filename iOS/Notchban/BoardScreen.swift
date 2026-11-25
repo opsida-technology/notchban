@@ -7,9 +7,14 @@ struct BoardScreen: View {
     @EnvironmentObject var link: Link
     @State private var column: Column?
     @State private var renaming = false
+    @Environment(\.verticalSizeClass) private var vertical
 
     var body: some View {
-        if let board = link.board(path) {
+        if let board = link.board(path), vertical == .compact {
+            LandscapeBoard(board: board).designScreen()
+                .onAppear { Orientation.allowLandscape(true) }
+                .onDisappear { Orientation.allowLandscape(false) }
+        } else if let board = link.board(path) {
             let columns = Column.allCases.filter { board.count($0) > 0 }
             let shown = column.flatMap { columns.contains($0) ? $0 : nil } ?? defaultColumn(board, columns)
             ScrollView {
@@ -46,6 +51,8 @@ struct BoardScreen: View {
             .designScreen()
             .safeAreaInset(edge: .bottom, spacing: 0) { TabBar(board: path) }
             .islandPrompt(isPresented: $renaming) { RenameBox(board: board) { renaming = false } }
+            .onAppear { Orientation.allowLandscape(true) }
+            .onDisappear { Orientation.allowLandscape(false) }
         } else {
             ContentUnavailableView("This board isn't on the Mac any more", systemImage: "questionmark.folder")
                 .designScreen()

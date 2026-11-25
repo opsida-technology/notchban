@@ -12,6 +12,7 @@ struct HomeView: View {
     @State private var due = Due.all
     /// The board the deck is narrowed to (its path); nil shows every project.
     @State private var project: String?
+    @State private var picking = false
     /// Cards sent off the deck, hidden until the Mac's next snapshot no longer shows them in review.
     @State private var gone: Set<String> = []
     @State private var noteFor: Pending?
@@ -346,17 +347,35 @@ struct HomeView: View {
 
     // MARK: filters
 
-    /// A dial of the projects with cards waiting, by the name the board shows (a rename counts), A to Z; hidden when
-    /// only one has any. Turn it with a drag, or tap a name.
+    /// One button naming the chosen project; it opens the dial. Hidden when only one project has cards waiting.
     @ViewBuilder
     private func projects(_ left: [Item]) -> some View {
         let names = Dictionary(grouping: left, by: { $0.board.path })
         let order = boards.filter { names[$0.path] != nil }
         if order.count > 1 {
-            ProjectDial(
-                options: [.init(path: nil, title: "All projects", count: left.count)]
-                    + order.map { .init(path: $0.path, title: $0.displayName, count: names[$0.path]?.count ?? 0) },
-                selection: $project)
+            let options = [DialOption(path: nil, title: "All projects", count: left.count)]
+                + order.map { DialOption(path: $0.path, title: $0.displayName, count: names[$0.path]?.count ?? 0) }
+            let current = options.first { $0.path == project } ?? options[0]
+            Button { picking = true } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "dial.low").font(.system(size: 15, weight: .semibold))
+                    Text(current.title).font(Theme.font(15, .semibold)).lineLimit(1)
+                    Text("\(current.count)").font(Theme.font(13, .bold)).foregroundStyle(Theme.fg3)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.fg3)
+                }
+                .foregroundStyle(Theme.fg)
+                .padding(.horizontal, 16).frame(minHeight: 46)
+                .background(Theme.fg.opacity(0.07), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Project: \(current.title)")
+            .accessibilityHint("Opens the project dial")
+            .sheet(isPresented: $picking) {
+                ProjectDial(title: "Project", options: options, selection: $project)
+                    .presentationDetents([.height(310)])
+                    .presentationDragIndicator(.visible)
+            }
         }
     }
 
@@ -773,105 +792,5 @@ private struct AlsoNeeds: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
         .accessibilityElement(children: .combine)
-    }
-}
-
-// MARK: - project dial
-
-/// A round dial: the names sit on a big circle whose top shows, the chosen one at the peak. A drag turns it and it
-/// settles on the nearest name; a tap on a neighbour turns it there.
-private struct ProjectDial: View {
-    struct Option: Identifiable {
-        let path: String?
-        let title: String
-        let count: Int
-        var id: String { path ?? "" }
-    }
-
-    let options: [Option]
-    @Binding var selection: String?
-
-    /// Where the dial is, in names (1.5 = halfway between the second and third); follows the finger.
-    @State private var turn: Double = 0
-    @State private var dragStart: Double?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private let radius: CGFloat = 230
-    private let step: Double = 0.62 // radians between two names
-    private let pixelsPerName: CGFloat = 110
-
-    private var index: Int { options.firstIndex { $0.path == selection } ?? 0 }
-
-    private var ring: some View {
-        let size = radius * 2 + 120
-        return Circle().strokeBorder(Theme.fg.opacity(0.10), lineWidth: 1.5)
-            .frame(width: size, height: size)
-            .offset(y: radius + 14)
-    }
-
-    private func name(_ i: Int, _ option: Option) -> some View {
-        let d = Double(i) - turn
-        let angle = d * step
-        let near = abs(d) < 0.5
-        return Button { settle(i) } label: {
-            Text(option.title)
-                .font(Theme.font(near ? 20 : 14, .semibold)).lineLimit(1)
-                .foregroundStyle(near ? Theme.fg : Theme.fg2)
-                .fixedSize()
-        }
-        .buttonStyle(.plain)
-        .rotationEffect(.radians(angle))
-        .offset(x: radius * CGFloat(sin(angle)), y: 18 + radius * CGFloat(1 - cos(angle)))
-        .opacity(max(0, 1 - abs(d) * 0.55))
-        .accessibilityHidden(true)
-    }
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            ForEach(Array(options.enumerated()), id: \.element.id) { i, option in
-                if abs(Double(i) - turn) < 1.7 { name(i, option) }
-            }
-            // the count of the chosen one, small, under its name
-            Text("\(options[index].count) waiting")
-                .font(Theme.font(12, .medium)).foregroundStyle(Theme.fg3)
-                .offset(y: 52)
-            // the peak mark the names stop under
-            Capsule().fill(Theme.indigo.fill).frame(width: 26, height: 4).offset(y: 6)
-        }
-        .frame(maxWidth: .infinity).frame(height: 92, alignment: .top)
-        .background(alignment: .top) { ring }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .background(Theme.fg.opacity(0.05), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 8)
-                .onChanged { g in
-                    let start = dragStart ?? turn
-                    dragStart = start
-                    turn = min(max(start - Double(g.translation.width / pixelsPerName), 0), Double(options.count - 1))
-                }
-                .onEnded { g in
-                    let end = (dragStart ?? turn) - Double((g.translation.width + g.velocity.width * 0.12) / pixelsPerName)
-                    dragStart = nil
-                    settle(Int(min(max(end.rounded(), 0), Double(options.count - 1))))
-                })
-        .onAppear { turn = Double(index) }
-        .onChange(of: selection) { if dragStart == nil { turn = Double(index) } }
-        .sensoryFeedback(.selection, trigger: index)
-        .accessibilityElement()
-        .accessibilityLabel("Project")
-        .accessibilityValue("\(options[index].title), \(options[index].count) waiting")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment: settle(min(index + 1, options.count - 1))
-            case .decrement: settle(max(index - 1, 0))
-            @unknown default: break
-            }
-        }
-    }
-
-    private func settle(_ i: Int) {
-        selection = options[i].path
-        if reduceMotion { turn = Double(i) } else { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { turn = Double(i) } }
     }
 }

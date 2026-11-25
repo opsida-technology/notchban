@@ -17,14 +17,18 @@
 		CD9812D81FCCC527D60806A0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 51AAA761B0A8540DF45D7B12 /* Assets.xcassets */; };
 		D34B38544367D49FE41917F3 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAAB30651747BA01EB7E531 /* Link.swift */; };
 		D4E54ED779BC8BAB99DBB6EA /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = F67A8CD01A14B254EA152C48 /* App.swift */; };
+		DFDB9D25208EA0FD2C3BCAC6 /* LandscapeBoard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77EBB1516D0F4F3A8F04C384 /* LandscapeBoard.swift */; };
 		E5C38352540EF96561624FB7 /* CardScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985AA9E91E15288A43B57BD6 /* CardScreen.swift */; };
+		FA2220CCD9233701B5DB13EC /* ProjectDial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 409C1D89C835F539F4091099 /* ProjectDial.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		04A93E8BDAFDA1826321B724 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		08340F2B5F25311F99C44BB3 /* BoardScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardScreen.swift; sourceTree = "<group>"; };
+		409C1D89C835F539F4091099 /* ProjectDial.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectDial.swift; sourceTree = "<group>"; };
 		51AAA761B0A8540DF45D7B12 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5473644093F682A52A09876B /* NewCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewCardView.swift; sourceTree = "<group>"; };
+		77EBB1516D0F4F3A8F04C384 /* LandscapeBoard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LandscapeBoard.swift; sourceTree = "<group>"; };
 		985AA9E91E15288A43B57BD6 /* CardScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CardScreen.swift; sourceTree = "<group>"; };
 		AAAAB30651747BA01EB7E531 /* Link.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Link.swift; sourceTree = "<group>"; };
 		BF74B7DEDABAB2C5608DC217 /* notchban */ = {isa = PBXFileReference; lastKnownFileType = folder; name = notchban; path = ..; sourceTree = SOURCE_ROOT; };
@@ -83,9 +87,11 @@
 				985AA9E91E15288A43B57BD6 /* CardScreen.swift */,
 				DD7CDF20C4DA39C1AB294D6D /* HomeView.swift */,
 				04A93E8BDAFDA1826321B724 /* Info.plist */,
+				77EBB1516D0F4F3A8F04C384 /* LandscapeBoard.swift */,
 				AAAAB30651747BA01EB7E531 /* Link.swift */,
 				5473644093F682A52A09876B /* NewCardView.swift */,
 				FD849913FB883F4932231A96 /* PairView.swift */,
+				409C1D89C835F539F4091099 /* ProjectDial.swift */,
 				CE82644C0302DBD435AD77CB /* Theme.swift */,
 			);
 			path = Notchban;
@@ -172,9 +178,11 @@
 				4081D8B682133F548DDB8094 /* BoardsView.swift in Sources */,
 				E5C38352540EF96561624FB7 /* CardScreen.swift in Sources */,
 				52A8FD32DCA8C17E2B173F7B /* HomeView.swift in Sources */,
+				DFDB9D25208EA0FD2C3BCAC6 /* LandscapeBoard.swift in Sources */,
 				D34B38544367D49FE41917F3 /* Link.swift in Sources */,
 				B39CD30AD1D70E826B143D18 /* NewCardView.swift in Sources */,
 				4F6A8B62EB090E8CD8BA512F /* PairView.swift in Sources */,
+				FA2220CCD9233701B5DB13EC /* ProjectDial.swift in Sources */,
 				91F4C4B2D53BB2593C8C454B /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

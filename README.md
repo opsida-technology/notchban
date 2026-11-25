@@ -112,6 +112,7 @@ Mac, which writes them into the `KANBAN.md` like any other edit of yours.
   is sealed (ChaChaPoly), so nobody nearby can read, change or replay it.
 - **Verdicts**: swipe the card (right approves, left asks for changes, up is done, down holds). A verdict waits
   five seconds with an Undo bar before it is sent.
+- **Projects and boards**: on the home screen a project dial (a ticked arc you turn) filters the cards that need you. Turn the phone sideways on a board and it lies down as one kanban row, empty columns folded to rails; tap a card for its sheet with the verdict buttons.
 - **Away from the Mac**: the phone shows the last boards it received. Verdicts you give are kept on the phone and
   sent, in order, when the Mac is back; a card you already decided on the Mac is skipped and named. Other changes
   need the Mac nearby and awake.

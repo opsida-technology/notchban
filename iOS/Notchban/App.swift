@@ -4,6 +4,7 @@ import UIKit
 
 @main
 struct NotchbanApp: App {
+    @UIApplicationDelegateAdaptor(Orientation.self) private var orientation
     @StateObject private var link = Link()
     @Environment(\.scenePhase) private var phase
 
@@ -785,5 +786,19 @@ private struct ToastModifier: ViewModifier {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: message)
+    }
+}
+
+/// The phone stays upright except on a board, which lies down when the phone does.
+final class Orientation: NSObject, UIApplicationDelegate {
+    nonisolated(unsafe) private static var mask = UIInterfaceOrientationMask.portrait
+
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask { Self.mask }
+
+    @MainActor static func allowLandscape(_ on: Bool) {
+        mask = on ? .allButUpsideDown : .portrait
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if !on { scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in } }
     }
 }

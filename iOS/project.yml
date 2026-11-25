@@ -38,7 +38,7 @@ targets:
         NSBonjourServices: [_notchban._tcp, _notchban._udp]
         NSCameraUsageDescription: Notchban reads the pairing code your Mac shows. Nothing is recorded or kept.
         UILaunchScreen: {}
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         ITSAppUsesNonExemptEncryption: false
         UIViewControllerBasedStatusBarAppearance: false
         UIStatusBarStyle: UIStatusBarStyleLightContent
