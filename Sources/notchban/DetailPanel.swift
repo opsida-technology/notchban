@@ -82,7 +82,7 @@ struct DetailPanel: View {
     /// What the agent needs from the owner, in the notch's black: black is the owner's.
     private func needsBlock(_ needs: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("NEEDS YOU TO").font(.system(size: 9.5, weight: .bold)).tracking(0.8).foregroundStyle(.white.opacity(0.6))
+            Text("NEEDS YOU TO").font(.system(size: 11, weight: .bold)).tracking(0.8).foregroundStyle(.white.opacity(0.75))
             Text(Format.markdown(needs)).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.white)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
@@ -184,6 +184,10 @@ struct DetailPanel: View {
                                 Text(item.2).font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 0)
+                            Text("\((items.firstIndex { $0.0 == item.0 } ?? 0) + 1)").font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.secondary).frame(width: 18, height: 18)
+                                .background(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.secondary.opacity(0.5)))
+                                .accessibilityHidden(true)
                         }
                         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(item.4.opacity(0.13)))
@@ -191,20 +195,13 @@ struct DetailPanel: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(item.1.replacingOccurrences(of: "…", with: "")): \(item.2)")
+                    .help("Key \((items.firstIndex { $0.0 == item.0 } ?? 0) + 1) · ⌘Z takes the last verdict back")
                 }
             }
         }
     }
 
-    private func review(_ verdict: Verdict) {
-        var note = ""
-        if verdict.needsNote {
-            let ask = verdict == .hold ? ("Hold \(card.id)", "Say why. It becomes the card's blocker.") : ("Changes to \(card.id)", "Say what to fix. The agent reads it when it picks the card up.")
-            guard let text = model.ask(ask.0, ask.1, button: verdict == .hold ? "Hold" : "Send back") else { return }
-            note = text
-        }
-        model.perform(.review(board: board.path, card: card.id, verdict: verdict, note: note))
-    }
+    private func review(_ verdict: Verdict) { model.review(verdict, board: board.path, card: card.id) }
 
     /// Add a note (any card) and set the review day (Human Review), drawn like fields to type into.
     private var actions: some View {

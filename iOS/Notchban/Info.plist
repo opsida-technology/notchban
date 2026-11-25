@@ -27,6 +27,8 @@
 		<string>_notchban._tcp</string>
 		<string>_notchban._udp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Notchban reads the pairing code your Mac shows. Nothing is recorded or kept.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>2026 Özgün Kasap</string>
 	<key>NSLocalNetworkUsageDescription</key>

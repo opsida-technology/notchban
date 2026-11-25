@@ -21,7 +21,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var offered = false
     private var keyMonitor: Any?
     /// The pill is just wide enough for an ear (rings with their count, figures) on each side of the notch.
-    var pillWidth: CGFloat { notch.width + 210 }
+    var pillWidth: CGFloat { notch.width + 240 }
+    /// The pill, taller while a tab hangs under it for cards that wait for the owner.
+    var pillHeight: CGFloat { notch.height + (model.reviewCount + model.staleCount > 0 ? 20 : 0) }
+    private var tabWatch: Any?
     private var hotKey: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -51,6 +54,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.orderFrontRegardless()
         model.start()
         pairing.start()
+        state.onVerdict = { [model] verdict, board, card in model.review(verdict, board: board, card: card) }
+        state.onUndo = { [model] in model.undoReview() }
+        // the pill grows a tab for cards that wait, and shrinks it again
+        tabWatch = model.$boards.sink { [weak self] _ in
+            DispatchQueue.main.async { if self?.model.expanded == false { self?.set(expanded: false) } }
+        }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.model.reveal, self.panel.isKeyWindow, event.window === self.panel else { return event }
             let textFocused = self.panel.firstResponder is NSText
@@ -87,7 +96,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height,
                                   width: size.width, height: size.height), display: true, animate: false)
         }
-        let pill = CGSize(width: pillWidth, height: notch.height)
+        let pill = CGSize(width: pillWidth, height: pillHeight)
         if expanded {
             place(CGSize(width: screen.frame.width * 0.9 + NotchView.margin * 2, height: screen.frame.height * 0.8 + notch.height + NotchView.margin))
             model.expanded = true

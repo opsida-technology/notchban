@@ -14,6 +14,13 @@ struct HomeView: View {
     @State private var gone: Set<String> = []
     @State private var noteFor: Pending?
     @State private var message: String?
+    /// The last swiped verdict, not sent yet, and the wait before it goes.
+    @State private var held: Pending?
+    @State private var holding: Task<Void, Never>?
+    /// A verdict the Mac refused while the app was in the background, to show on return.
+    @State private var failure: String?
+    @Environment(\.scenePhase) private var phase
+    @AppStorage("deckHintSeen") private var hintSeen = false
     @FocusState private var searchFocused: Bool
 
     enum Due: Hashable { case all, late, today, later }
@@ -28,11 +35,15 @@ struct HomeView: View {
         (link.snapshot?.boards ?? []).sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
-    typealias Item = (board: Board, card: Card)
+    struct Item: Identifiable {
+        let board: Board
+        let card: Card
+        var id: String { board.path + "|" + card.id }
+    }
 
     /// Human Review cards, soonest review day first (none last), then by board.
     private var waiting: [Item] {
-        boards.flatMap { b in b.cards.filter { $0.column == .review }.map { (b, $0) } }.sorted { a, b in
+        boards.flatMap { b in b.cards.filter { $0.column == .review }.map { Item(board: b, card: $0) } }.sorted { a, b in
             switch (a.card.due, b.card.due) {
             case let (x?, y?) where x != y: return x < y
             case (_?, nil): return true
@@ -41,6 +52,9 @@ struct HomeView: View {
             }
         }
     }
+
+    /// Sent off the deck, or kept on the phone for the Mac.
+    private func hidden(_ item: Item) -> Bool { gone.contains(key(item)) || link.isQueued(item.board.path, item.card.id) }
 
     private func bucket(_ card: Card) -> Due {
         guard let n = card.due.flatMap(Day.offset) else { return .later }
@@ -51,14 +65,14 @@ struct HomeView: View {
     private var deck: [Item] {
         let q = query.trimmingCharacters(in: .whitespaces)
         return waiting.filter { item in
-            !gone.contains(key(item))
+            !hidden(item)
                 && (due == .all || bucket(item.card) == due)
                 && (q.isEmpty || "\(item.card.title) \(item.card.id) \(item.board.displayName)".localizedCaseInsensitiveContains(q))
         }
     }
 
     var body: some View {
-        let left = waiting.filter { !gone.contains(key($0)) }
+        let left = waiting.filter { !hidden($0) }
         DesignScroll(spacing: 14) {
             island(left)
         } content: {
@@ -76,11 +90,33 @@ struct HomeView: View {
                                    : "No card matches “\(query)”",
                                line: query.isEmpty ? "\(left.count) other\(left.count == 1 ? "" : "s") wait\(left.count == 1 ? "s" : "") under All." : "Try another word.")
                 } else {
-                    Deck(items: deck, connected: link.isConnected, verdict: verdict)
+                    Deck(items: deck, connected: link.isConnected, queued: link.queued.count, verdict: verdict)
+                    if !hintSeen {
+                        Label("Swipe the card: right approves, left asks for changes, up is done, down holds.", systemImage: "hand.draw")
+                            .font(Theme.font(12.5)).foregroundStyle(Theme.fg3).multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             }
+            if link.snapshot != nil { AlsoNeeds(rows: attention) }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { TabBar() }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // the Undo bar takes the tab bar's place, not a spot over the verdict buttons: a tap that comes after it
+            // has gone lands on a tab, never on Approve
+            ZStack {
+                if let held { undoBar(held) } else { TabBar() }
+            }
+            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: held?.id)
+        }
+        .onChange(of: phase) {
+            if phase != .active { commit() } else if let f = failure { message = f; failure = nil }
+        }
+        .onChange(of: link.notice) {
+            if let n = link.notice { message = n; link.notice = nil }
+        }
+        .onChange(of: held?.id) {
+            if let held { UIAccessibility.post(notification: .announcement, argument: "\(held.item.card.id) sent in 5 seconds. Undo is at the bottom.") }
+        }
         .sheet(item: $noteFor) { pending in
             NoteSheet(ref: ref(pending.item), verdict: pending.verdict) { send(pending.item, pending.verdict, sent: true) }
                 .presentationDetents([.medium, .large])
@@ -103,14 +139,35 @@ struct HomeView: View {
         }
     }
 
+    // MARK: also needs you
+
+    /// What else waits for the owner besides a verdict: a card nobody works on (its lease ran out), a blocked one, a limit
+    /// nearly used up while agents work.
+    private var attention: [AlsoNeeds.Row] {
+        var rows: [AlsoNeeds.Row] = []
+        for b in boards {
+            for c in b.cards where c.isStale() {
+                rows.append(.init(id: b.path + "|" + c.id, ref: CardRef(board: b.path, card: c.id), icon: "hourglass.bottomhalf.filled",
+                                  tone: Theme.late, title: "\(c.id) \(c.title)", why: "Nobody is working on it: its lease ran out."))
+            }
+            for c in b.cards where c.column == .blocked {
+                rows.append(.init(id: b.path + "|" + c.id, ref: CardRef(board: b.path, card: c.id), icon: "pause.circle.fill",
+                                  tone: Theme.ember, title: "\(c.id) \(c.title)", why: c.blocker ?? "Blocked."))
+            }
+        }
+        for ear in link.snapshot?.ears ?? [] where ear.working > 0 && (ear.fiveHour ?? 0) >= 0.85 {
+            rows.append(.init(id: "limit-" + ear.name, ref: nil, icon: "gauge.with.dots.needle.100percent", tone: Theme.ember,
+                              title: "\(ear.name) is at \(Int((ear.fiveHour ?? 0) * 100))% of its 5-hour limit",
+                              why: "\(ear.working) agent\(ear.working == 1 ? "" : "s") working."))
+        }
+        return rows
+    }
+
     // MARK: verdicts
 
-    /// A verdict on a card from the deck. Returns false (the card comes back) when it can't be sent now.
+    /// A verdict on a card from the deck. Returns false (the card stays) while a note is asked first. With the Mac away it
+    /// waits on the phone.
     private func verdict(_ item: Item, _ verdict: Verdict) -> Bool {
-        guard link.isConnected else {
-            message = "Mac not nearby – changes wait"
-            return false
-        }
         if verdict.needsNote {
             noteFor = Pending(item: item, verdict: verdict)
             return false
@@ -119,19 +176,62 @@ struct HomeView: View {
         return true
     }
 
-    /// Takes the card off the deck and, unless a note sheet already sent it, sends the verdict; puts it back on error.
+    /// Takes the card off the deck and, unless a note sheet already sent it, holds the verdict for five seconds with an
+    /// Undo bar before it goes to the Mac: a swipe is quick to make by mistake.
     private func send(_ item: Item, _ verdict: Verdict, sent: Bool) {
-        let k = key(item)
         Deck.exit = verdict
-        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { _ = gone.insert(k) }
+        hintSeen = true
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { _ = gone.insert(key(item)) }
         guard !sent else { return }
+        commit() // one held at a time: the one before goes now
+        held = Pending(item: item, verdict: verdict)
+        holding = Task {
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { commit() }
+        }
+    }
+
+    /// Sends the held verdict now; puts the card back on error.
+    private func commit() {
+        holding?.cancel()
+        holding = nil
+        guard let p = held else { return }
+        held = nil
         Task {
-            let outcome = await link.run(.review(board: item.board.path, card: item.card.id, verdict: verdict, note: ""))
+            let outcome = await link.review(board: p.item.board.path, card: p.item.card.id, verdict: p.verdict, note: "")
             if let error = outcome.error {
-                withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { _ = gone.remove(k) }
-                message = error
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { _ = gone.remove(key(p.item)) }
+                // shown now, or when the owner is back: a toast over a phone in a pocket reaches nobody
+                if phase == .active { message = error } else { failure = error }
             }
         }
+    }
+
+    /// Drops the held verdict before it is sent; the card comes back to the deck.
+    private func undo() {
+        holding?.cancel()
+        holding = nil
+        guard let p = held else { return }
+        held = nil
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { _ = gone.remove(key(p.item)) }
+    }
+
+    private func undoBar(_ p: Pending) -> some View {
+        HStack(spacing: 12) {
+            Circle().fill(Theme.verdict(p.verdict).fill).frame(width: 10, height: 10)
+            Text("\(p.verdict == .approved ? "Approved" : "Done") · \(p.item.card.id)")
+                .font(Theme.font(15, .semibold)).foregroundStyle(Theme.onNotch).lineLimit(1)
+            Spacer()
+            Button("Undo", action: undo)
+                .font(Theme.font(15, .bold))
+                .buttonStyle(WhiteCapsuleStyle())
+                .frame(height: 48)
+        }
+        .padding(.leading, 18).padding(.trailing, 6).padding(.vertical, 6)
+        .background(Capsule().fill(Theme.notch).overlay(Capsule().strokeBorder(Theme.notchLine)))
+        .padding(.horizontal, 18).padding(.bottom, 4)
+        .transition(.opacity)
+        .accessibilityElement(children: .contain)
     }
 
     private func ref(_ item: Item) -> CardRef { CardRef(board: item.board.path, card: item.card.id) }
@@ -141,9 +241,9 @@ struct HomeView: View {
     private func island(_ left: [Item]) -> some View {
         Island {
             HStack(spacing: 10) {
-                Button { forgetting = true } label: { LivePill() }
+                Button { forgetting = true } label: { LivePill(opens: true) }
                     .buttonStyle(.plain)
-                    .accessibilityHint("Forget this Mac")
+                    .accessibilityHint("Opens the option to forget this Mac")
                 Spacer()
                 IconButton(systemImage: searching ? "xmark" : "magnifyingglass", label: searching ? "Close search" : "Search cards") {
                     searching.toggle()
@@ -182,31 +282,60 @@ struct HomeView: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// Codex and Claude: In Progress cards held by each, from the owners on the boards.
+    /// Codex and Claude as the Mac's notch shows them: agents at work now, and the 5-hour (outer ring) and weekly
+    /// (inner ring) limits.
     private var ears: some View {
-        let working = boards.flatMap(\.cards).filter { $0.column == .progress }
-        func count(_ name: String) -> Int { working.filter { ($0.owner ?? "").localizedCaseInsensitiveContains(name) }.count }
-        return HStack(spacing: 8) {
-            ear("Codex", count("codex"), of: working.count, color: Theme.sky.text)
-            ear("Claude", count("claude"), of: working.count, color: Theme.ok.text)
+        TimelineView(.everyMinute) { time in
+            HStack(spacing: 8) {
+                ear("Codex", color: Theme.sky.text, now: time.date)
+                ear("Claude", color: Theme.ok.text, now: time.date)
+            }
         }
     }
 
-    private func ear(_ name: String, _ n: Int, of total: Int, color: Color) -> some View {
-        HStack(spacing: 8) {
-            Circle().fill(n == 0 ? Theme.onNotch2.opacity(0.4) : color).frame(width: 7, height: 7)
-                .shadow(color: n == 0 ? .clear : color, radius: 4)
-            Text(name).fontWeight(.semibold).foregroundStyle(Theme.onNotch).lineLimit(1).fixedSize()
-            Spacer(minLength: 0)
-            Text(n == 0 ? "idle" : "\(n) at work").font(Theme.font(12)).monospacedDigit().lineLimit(1).fixedSize()
-                .foregroundStyle(n == 0 ? Theme.onNotch2 : color)
+    private func ear(_ name: String, color: Color, now: Date) -> some View {
+        let ear = link.snapshot?.ears?.first { $0.name == name }
+        let n = ear?.working ?? 0
+        let five = Self.used(ear?.fiveHour, resets: ear?.fiveHourResets, now: now)
+        let week = Self.used(ear?.week, resets: ear?.weekResets, now: now)
+        // as on the Mac: a figure that is unknown, or written more than half an hour ago, is dimmed
+        let stale = five == nil || ear?.recorded.map { now.timeIntervalSince($0) > 1800 } == true
+        func percent(_ used: Double) -> String { "\(Int((used * 100).rounded()))%" }
+        let limits = five.map { "\(percent($0)) · ↻ \(Self.left(until: ear?.fiveHourResets, now: now))" }
+            ?? week.map { "Week \(percent($0)) · ↻ \(Self.left(until: ear?.weekResets, now: now))" } ?? "Limits not known"
+        return HStack(spacing: 10) {
+            LimitRings(fiveHour: five, week: week).opacity(stale ? 0.55 : 1)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text(name).fontWeight(.semibold).foregroundStyle(Theme.onNotch).lineLimit(1).fixedSize()
+                    Spacer(minLength: 0)
+                    Text(n == 0 ? "idle" : "\(n) at work").font(Theme.font(12)).monospacedDigit().lineLimit(1).fixedSize()
+                        .foregroundStyle(n == 0 ? Theme.onNotch2 : color)
+                }
+                Text(limits).font(Theme.font(11.5)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+                    .opacity(stale ? 0.6 : 1)
+            }
         }
         .font(Theme.font(13))
         .foregroundStyle(Theme.onNotch2)
-        .padding(.horizontal, 14)
-        .frame(height: 38)
+        .padding(.leading, 10).padding(.trailing, 14)
+        .frame(height: 44)
         .background(Capsule().fill(Theme.notchWell).overlay(Capsule().strokeBorder(Theme.notchLine)))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(five.map { "\(name): \(n) at work, \(Int(($0 * 100).rounded())) percent of the 5-hour limit used, resets in \(Self.left(until: ear?.fiveHourResets, now: now)); \(week.map { "\(Int(($0 * 100).rounded())) percent" } ?? "unknown") of the week" }
+                            ?? "\(name): \(n) at work, limits not known")
+    }
+
+    /// A limit's used share (0...1), or nil when the Mac has no figure or the window has rolled over since.
+    private static func used(_ percent: Double?, resets: Date?, now: Date) -> Double? {
+        guard let percent, let resets, resets > now else { return nil }
+        return min(max(percent, 0), 100) / 100
+    }
+
+    private static func left(until resets: Date?, now: Date) -> String {
+        guard let resets, resets > now else { return "—" }
+        let m = Int(resets.timeIntervalSince(now) / 60)
+        return m >= 2880 ? "\(m / 1440)d \(m % 1440 / 60)h" : m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
     }
 
     // MARK: filters
@@ -223,7 +352,7 @@ struct HomeView: View {
     }
 }
 
-private func key(_ item: HomeView.Item) -> String { item.board.path + "|" + item.card.id }
+private func key(_ item: HomeView.Item) -> String { item.id }
 
 // MARK: - deck
 
@@ -231,7 +360,8 @@ private func key(_ item: HomeView.Item) -> String { item.board.path + "|" + item
 private struct Deck: View {
     let items: [HomeView.Item]
     let connected: Bool
-    /// Sends a verdict on a card; false means the card stays (offline, or a note is asked first).
+    let queued: Int
+    /// Sends a verdict on a card; false means the card stays (a note is asked first).
     let verdict: (HomeView.Item, Verdict) -> Bool
 
     /// Where the last card sent went, read by the leaving card's transition.
@@ -239,9 +369,9 @@ private struct Deck: View {
 
     @State private var drag = CGSize.zero
     @State private var armed: Verdict?
-    @State private var bounced = 0
     @ScaledMetric(relativeTo: .body) private var height: CGFloat = 248
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var type
 
     private static let threshold: CGFloat = 110
 
@@ -249,19 +379,19 @@ private struct Deck: View {
         let visible = Array(items.prefix(3))
         VStack(spacing: 14) {
             ZStack(alignment: .top) {
-                ForEach(Array(visible.enumerated()), id: \.element.card.id) { i, item in
+                ForEach(Array(visible.enumerated()), id: \.element.id) { i, item in
                     card(item, at: i)
                 }
             }
             .frame(height: height + 26, alignment: .top)
             buttons(visible.first)
             if !connected {
-                Label("Mac not nearby – changes wait", systemImage: "wifi.slash").labelStyle(TightLabel())
+                Label(queued == 0 ? "Mac not nearby – verdicts wait on your phone"
+                      : "Mac not nearby – \(queued) verdict\(queued == 1 ? "" : "s") waiting to send", systemImage: "wifi.slash").labelStyle(TightLabel())
                     .font(Theme.metaBold).foregroundStyle(Theme.ember.text)
             }
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: armed) { _, new in new != nil }
-        .sensoryFeedback(.warning, trigger: bounced)
     }
 
     // MARK: cards
@@ -309,18 +439,18 @@ private struct Deck: View {
     private func dragGesture(_ item: HomeView.Item) -> some Gesture {
         DragGesture(minimumDistance: 12)
             .onChanged { value in
-                drag = value.translation
+                // at the big text sizes the screen scrolls: an up or down drag there is a scroll, not Done or Hold
+                drag = type.isAccessibilitySize ? CGSize(width: value.translation.width, height: 0) : value.translation
                 armed = progress >= 1 ? direction(drag) : nil
             }
             .onEnded { value in
                 // past the threshold, or a quick flick (judged by where it was thrown)
-                let thrown = value.predictedEndTranslation
+                let thrown = type.isAccessibilitySize ? CGSize(width: value.predictedEndTranslation.width, height: 0) : value.predictedEndTranslation
                 let chosen = progress >= 1 ? direction(drag)
                     : max(abs(thrown.width), abs(thrown.height)) > Self.threshold * 1.8 ? direction(thrown) : nil
                 if let v = chosen, verdict(item, v) {
                     drag = .zero // the leaving card keeps its place and flies from there
                 } else {
-                    if chosen != nil && !connected { bounced += 1 }
                     withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.42, dampingFraction: 0.66)) {
                         drag = .zero
                     }
@@ -342,7 +472,7 @@ private struct Deck: View {
 
     private func round(_ v: Verdict, _ title: String, _ icon: String, _ top: HomeView.Item?) -> some View {
         let tone = Theme.verdict(v)
-        let primary = v == .done
+        let primary = v == .approved
         return Button {
             if let top { _ = verdict(top, v) }
         } label: {
@@ -358,8 +488,7 @@ private struct Deck: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScale())
-        .disabled(top == nil || !connected)
-        .opacity(connected ? 1 : 0.4)
+        .disabled(top == nil)
         .accessibilityLabel(title)
         .accessibilityHint(hint(v))
     }
@@ -423,22 +552,22 @@ private struct DeckCard: View {
                 }
             }
             Text(card.title).font(Theme.font(23, .bold)).kerning(-0.5).foregroundStyle(Theme.fg)
-                .multilineTextAlignment(.leading).lineLimit(4).minimumScaleFactor(0.8)
+                .multilineTextAlignment(.leading).lineLimit(3).minimumScaleFactor(0.8)
             if let needs = card.needs {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("NEEDS YOU TO").kerning(0.9).font(Theme.font(10.5, .bold)).foregroundStyle(Theme.review.text)
                     Text(needs.prefix(1).uppercased() + needs.dropFirst()).font(Theme.font(14.5, .semibold))
-                        .foregroundStyle(Theme.fg).lineLimit(4)
+                        .foregroundStyle(Theme.fg).lineLimit(3)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Theme.review.fill.opacity(0.12)))
             }
             Spacer(minLength: 0)
-            HStack(spacing: 6) {
-                if card.isHumanEntered { HumanChip() }
-                if let track = card.track { Tag(text: track) }
-                if card.total > 0 { Tag(text: "\(card.checked)/\(card.total)", systemImage: "checklist") }
+            // what the verdict rests on first; the rest drops out when the row is too wide
+            ViewThatFits(in: .horizontal) {
+                chips(all: true)
+                chips(all: false)
             }
         }
         .padding(18)
@@ -471,6 +600,17 @@ private struct DeckCard: View {
         }
         .cardShadow(radius: 34)
         .accessibilityElement(children: .combine)
+    }
+
+    private func chips(all: Bool) -> some View {
+        HStack(spacing: 6) {
+            if card.proof.isEmpty { Pill(text: "No proof", tone: Theme.ember, systemImage: "exclamationmark.triangle") }
+            else { Pill(text: card.proof.count == 1 ? "Proof" : "Proof \(card.proof.count)", tone: Theme.ok, systemImage: "checkmark.seal") }
+            if card.notes.contains("): changes") { Pill(text: "Back after changes", tone: Theme.sky, systemImage: "arrow.uturn.left") }
+            if all, card.isHumanEntered { HumanChip() }
+            if all, let track = card.track { Tag(text: track) }
+            if card.total > 0 { Tag(text: "\(card.checked)/\(card.total)", systemImage: "checklist") }
+        }
     }
 
     private var stampPlace: Alignment {
@@ -535,5 +675,83 @@ struct TightLabel: LabelStyle {
             configuration.icon.font(.system(size: 11, weight: .semibold))
             configuration.title
         }
+    }
+}
+
+/// The Mac's two limit arcs: the outer one the 5-hour limit, the inner one the weekly; none for a figure not known.
+private struct LimitRings: View {
+    let fiveHour: Double?
+    let week: Double?
+
+    var body: some View {
+        ZStack {
+            arc(fiveHour, size: 26)
+            arc(week, size: 14)
+        }
+        .frame(width: 26, height: 26)
+        .accessibilityHidden(true)
+    }
+
+    private func arc(_ used: Double?, size: CGFloat) -> some View {
+        ZStack {
+            Circle().stroke(Theme.onNotch.opacity(0.12), lineWidth: 3)
+            Circle().trim(from: 0, to: used.map { max($0, 0.015) } ?? 0)
+                .stroke(used.map { $0 < 0.6 ? Theme.ok.fill : $0 < 0.85 ? Theme.ember.fill : Theme.late.fill } ?? .clear,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// Under the deck: the things besides a verdict that wait for the owner. A card opens; a limit is just said.
+private struct AlsoNeeds: View {
+    struct Row: Identifiable {
+        let id: String
+        let ref: CardRef?
+        let icon: String
+        let tone: Theme.Tone
+        let title: String
+        let why: String
+    }
+
+    let rows: [Row]
+    @State private var all = false
+
+    var body: some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                FieldLabel(text: "Also needs you · \(rows.count)")
+                ForEach(all ? rows : Array(rows.prefix(4))) { row in
+                    if let ref = row.ref {
+                        NavigationLink(value: ref) { content(row, chevron: true) }.buttonStyle(.plain)
+                    } else {
+                        content(row, chevron: false)
+                    }
+                }
+                if rows.count > 4 {
+                    Button(all ? "Show fewer" : "Show all \(rows.count)") { all.toggle() }
+                        .font(Theme.metaBold).foregroundStyle(Theme.fg2).padding(.leading, 4)
+                }
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    private func content(_ row: Row, chevron: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: row.icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(row.tone.text)
+                .frame(width: 36, height: 36).background(Circle().fill(row.tone.fill.opacity(0.16)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.title).font(Theme.font(14.5, .semibold)).foregroundStyle(Theme.fg).lineLimit(2)
+                Text(row.why).font(Theme.font(12.5)).foregroundStyle(Theme.fg2).lineLimit(2)
+            }
+            Spacer(minLength: 4)
+            if chevron { Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.fg3) }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
+        .accessibilityElement(children: .combine)
     }
 }

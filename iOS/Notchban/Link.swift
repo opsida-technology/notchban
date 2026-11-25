@@ -9,6 +9,8 @@ import UIKit
 struct Snapshot: Codable {
     var boards: [Board]
     var at: Date
+    /// What the Mac's notch ears showed; nil from a Mac that sends none.
+    var ears: [Ear]?
 }
 
 /// The Mac this phone is paired with, kept in the Keychain.
@@ -23,10 +25,24 @@ struct PairedMac: Codable {
 struct Outcome {
     var added: String?
     var error: String?
+    /// The Mac never gave an answer (not nearby, link dropped, silence): the command may be sent again.
+    var retry = false
+    /// A verdict kept on the phone until the Mac is back.
+    var queued = false
+}
+
+/// A verdict waiting on the phone for the Mac. Replaying one is safe: the Mac refuses a card no longer in review.
+struct Queued: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var board: String
+    var card: String
+    var verdict: Verdict
+    var note: String
 }
 
 /// The phone's side of the link: finds the paired Mac nearby (MultipeerConnectivity, encryption required), keeps the
-/// last snapshot on disk, and sends the owner's commands. No offline queue: writes need the Mac nearby.
+/// last snapshot on disk, and sends the owner's commands. Review verdicts wait on the phone when the Mac is away
+/// and go when it is back; every other command needs the Mac nearby.
 @MainActor
 final class Link: NSObject, ObservableObject {
     enum State { case searching, connecting, connected }
@@ -37,6 +53,10 @@ final class Link: NSObject, ObservableObject {
     /// Macs that can be paired with, while this phone is not paired.
     @Published private(set) var nearby: [MCPeerID] = []
     @Published private(set) var pairingError: String?
+    /// Verdicts given while the Mac was away, oldest first.
+    @Published private(set) var queued: [Queued] = []
+    /// What happened to queued verdicts the Mac refused, to show once.
+    @Published var notice: String?
 
     var isConnected: Bool { state == .connected }
 
@@ -45,26 +65,36 @@ final class Link: NSObject, ObservableObject {
     private var session: MCSession?
     /// Every Mac found, with its discovery id.
     private var macs: [MCPeerID: String] = [:]
-    /// The device id and Mac of a pairing in flight.
-    private var pairing: (device: String, peer: MCPeerID)?
+    /// The device id and scanned QR code of a pairing in flight; kept only once the Mac proves the token in a session.
+    private var pairing: (device: String, offer: PairingOffer)?
     private var waiting: [UUID: CheckedContinuation<Outcome, Never>] = [:]
     /// Set once this session's Mac proved the token over its one-time key: snapshots and results come only sealed in it.
     private var channel: Channel?
 
     private static let cache = URL.applicationSupportDirectory.appending(path: "snapshot.json")
+    private static let queueFile = URL.applicationSupportDirectory.appending(path: "queue.json")
+    private var flushing = false
 
     override init() {
         super.init()
         paired = MacKeychain.read()
         snapshot = (try? Data(contentsOf: Self.cache)).flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
+        queued = (try? Data(contentsOf: Self.queueFile)).flatMap { try? JSONDecoder().decode([Queued].self, from: $0) } ?? []
         browse()
+        #if DEBUG
+        // for testing against a debug Mac build in the simulator, which has no camera
+        if paired == nil, let text = ProcessInfo.processInfo.environment["NOTCHBAN_PAIR_LINK"], let offer = PairingOffer(link: text) {
+            pair(offer)
+        }
+        #endif
     }
 
     func board(_ path: String) -> Board? { snapshot?.boards.first { $0.path == path } }
 
     /// Starts looking again (the app came back to the front, or a link dropped).
     func browse() {
-        guard state != .connected else { return }
+        // restarting the browser while inviting would drop the invitation without a word
+        guard state == .searching else { return }
         browser?.stopBrowsingForPeers()
         macs = [:]
         nearby = []
@@ -76,19 +106,22 @@ final class Link: NSObject, ObservableObject {
 
     // MARK: pairing
 
-    func pair(with peer: MCPeerID, code: String) {
-        let device = UUID().uuidString
-        pairing = (device, peer)
+    /// Pairs with the Mac whose QR code was scanned, as soon as it is found nearby.
+    func pair(_ offer: PairingOffer) {
+        pairing = (UUID().uuidString, offer)
         pairingError = nil
-        invite(peer, Invitation(device: device, name: me.displayName, code: code))
+        reconnect()
     }
 
     /// Drops the pairing and the boards it brought. The Mac keeps its side until "Forget This iPhone" there.
     func forget() {
         MacKeychain.delete()
         paired = nil
+        pairing = nil
         snapshot = nil
         try? FileManager.default.removeItem(at: Self.cache)
+        queued = []
+        saveQueue()
         session?.disconnect()
         session = nil
         state = .searching
@@ -104,13 +137,25 @@ final class Link: NSObject, ObservableObject {
         channel = nil
         state = .connecting
         browser.invitePeer(peer, to: s, withContext: context, timeout: 20)
+        // MultipeerConnectivity does not always report a declined or lost invitation: give up on it ourselves
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self, self.session === s, self.state == .connecting else { return }
+            s.disconnect()
+            self.changed(s, peer, .notConnected)
+        }
     }
 
-    /// The paired Mac, if it is in reach.
+    /// The Mac being paired with, or the paired one, if it is in reach.
     private func reconnect() {
-        guard let paired, state == .searching,
-              let peer = macs.first(where: { $0.value == paired.mac })?.key else { return }
-        invite(peer, Invitation.paired(device: paired.device, name: me.displayName, token: paired.token))
+        guard let secret, state == .searching,
+              let peer = macs.first(where: { $0.value == secret.mac })?.key else { return }
+        invite(peer, Invitation.paired(device: secret.device, name: me.displayName, token: secret.token))
+    }
+
+    /// What this phone proves, and to which Mac: the scanned code's token while pairing, else the paired one's.
+    private var secret: (device: String, token: Data, mac: String)? {
+        if let pairing { return (pairing.device, pairing.offer.token, pairing.offer.mac) }
+        return paired.map { ($0.device, $0.token, $0.mac) }
     }
 
     // MARK: commands
@@ -119,35 +164,78 @@ final class Link: NSObject, ObservableObject {
     func run(_ command: BoardCommand) async -> Outcome {
         let id = UUID()
         guard let session, isConnected, var channel, let message = try? channel.seal(.command(id: id, command)) else {
-            return Outcome(error: "Your Mac isn't nearby. Try again when it is.")
+            return Outcome(error: "Your Mac isn't nearby. Try again when it is.", retry: true)
         }
         self.channel = channel
         do {
             try session.send(message, toPeers: session.connectedPeers, with: .reliable)
         } catch {
-            return Outcome(error: "Couldn't reach your Mac: \(error.localizedDescription)")
+            return Outcome(error: "Couldn't reach your Mac: \(error.localizedDescription)", retry: true)
         }
         return await withCheckedContinuation { continuation in
             waiting[id] = continuation
             DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                self?.waiting.removeValue(forKey: id)?.resume(returning: Outcome(error: "Your Mac didn't answer. Check the board before trying again."))
+                self?.waiting.removeValue(forKey: id)?.resume(returning: Outcome(error: "Your Mac didn't answer. Check the board before trying again.", retry: true))
             }
+        }
+    }
+
+    /// A verdict: sent now when the Mac is near, else kept on the phone and sent when it is back.
+    func review(board: String, card: String, verdict: Verdict, note: String) async -> Outcome {
+        if isConnected {
+            let outcome = await run(.review(board: board, card: card, verdict: verdict, note: note))
+            if !outcome.retry { return outcome }
+        }
+        queued.append(Queued(board: board, card: card, verdict: verdict, note: note))
+        saveQueue()
+        return Outcome(queued: true)
+    }
+
+    func isQueued(_ board: String, _ card: String) -> Bool { queued.contains { $0.board == board && $0.card == card } }
+
+    /// Sends the waiting verdicts in order; stops at the first the Mac cannot be asked, reports the ones it refuses.
+    private func flush() {
+        guard !flushing, !queued.isEmpty else { return }
+        flushing = true
+        Task {
+            var refused: [String] = []
+            while let next = queued.first, isConnected {
+                let outcome = await run(.review(board: next.board, card: next.card, verdict: next.verdict, note: next.note))
+                if outcome.retry { break }
+                queued.removeAll { $0.id == next.id }
+                saveQueue()
+                if outcome.error != nil { refused.append(next.card) }
+            }
+            flushing = false
+            if !refused.isEmpty {
+                notice = "\(refused.joined(separator: ", ")) \(refused.count == 1 ? "was" : "were") already decided on your Mac."
+            }
+        }
+    }
+
+    private func saveQueue() {
+        guard !queued.isEmpty else {
+            try? FileManager.default.removeItem(at: Self.queueFile)
+            return
+        }
+        try? FileManager.default.createDirectory(at: Self.queueFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(queued) {
+            try? data.write(to: Self.queueFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
     }
 
     // MARK: events
 
-    private func found(_ peer: MCPeerID, mac: String?) {
-        guard let mac else { return }
+    private func found(_ peer: MCPeerID, mac: String?, by b: MCNearbyServiceBrowser) {
+        // a peer found by a browser since replaced cannot be invited through the new one
+        guard let mac, b === browser else { return }
         macs[peer] = mac
-        if paired == nil {
-            if !nearby.contains(peer) { nearby.append(peer) }
-        } else {
-            reconnect()
-        }
+        if paired == nil, !nearby.contains(peer) { nearby.append(peer) }
+        reconnect()
     }
 
-    private func lost(_ peer: MCPeerID) {
+    private func lost(_ peer: MCPeerID, by b: MCNearbyServiceBrowser) {
+        guard b === browser else { return }
         macs[peer] = nil
         nearby.removeAll { $0 == peer }
     }
@@ -162,11 +250,11 @@ final class Link: NSObject, ObservableObject {
             session = nil
             channel = nil
             state = .searching
-            for (_, c) in waiting { c.resume(returning: Outcome(error: "The link to your Mac dropped. Check the board before trying again.")) }
+            for (_, c) in waiting { c.resume(returning: Outcome(error: "The link to your Mac dropped. Check the board before trying again.", retry: true)) }
             waiting = [:]
-            if pairing != nil, paired == nil {
+            if pairing != nil {
                 pairing = nil
-                pairingError = "Your Mac didn't accept that code. Check it, or show a new one on the Mac."
+                pairingError = "Your Mac didn't accept that code. Show a new one on the Mac and scan it again."
             }
             // the Mac may have only blinked: try again shortly, while it is still found
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reconnect() }
@@ -182,14 +270,25 @@ final class Link: NSObject, ObservableObject {
             guard let message = try? channel.open(data) else { return s.disconnect() }
             self.channel = channel
             switch message {
-            case let .snapshot(boards, at):
+            case let .snapshot(boards, at, ears):
+                if let pairing {  // the Mac proved the scanned token in this session: keep the pairing
+                    let record = PairedMac(device: pairing.device, token: pairing.offer.token, mac: pairing.offer.mac, name: peer.displayName)
+                    if let failure = MacKeychain.save(record) {
+                        pairingError = "Couldn't keep the pairing in the Keychain (\(failure))."
+                        return s.disconnect()
+                    }
+                    paired = record
+                    self.pairing = nil
+                    nearby = []
+                }
                 state = .connected
-                let fresh = Snapshot(boards: boards, at: at)
+                let fresh = Snapshot(boards: boards, at: at, ears: ears)
                 snapshot = fresh
                 if let data = try? JSONEncoder().encode(fresh) {
                     try? FileManager.default.createDirectory(at: Self.cache.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try? data.write(to: Self.cache, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                 }
+                flush()
             case let .result(id, added, error):
                 waiting.removeValue(forKey: id)?.resume(returning: Outcome(added: added, error: error))
             default:
@@ -202,29 +301,17 @@ final class Link: NSObject, ObservableObject {
         case let .challenge(nonce, macKey, proof):
             // The Mac proves the token over its one-time key; the phone answers over both keys, and the two agree a
             // channel no one relaying between them can read or change.
-            guard let paired, pairing == nil,
-                  Wire.verify(sessionProof: proof, token: paired.token, role: "mac", device: paired.device, nonce: nonce, keys: macKey)
+            guard let current = secret, Wire.verify(sessionProof: proof, token: current.token, role: "mac",
+                                                    device: current.device, nonce: nonce, keys: macKey)
             else { return s.disconnect() }
             let own = Curve25519.KeyAgreement.PrivateKey(), phoneKey = own.publicKey.rawRepresentation
-            guard let channel = try? Channel(role: "phone", own: own, mac: macKey, phone: phoneKey, token: paired.token,
-                                             device: paired.device, nonce: nonce),
+            guard let channel = try? Channel(role: "phone", own: own, mac: macKey, phone: phoneKey, token: current.token,
+                                             device: current.device, nonce: nonce),
                   let answer = try? WireMessage.answer(key: phoneKey, proof: Wire.sessionProof(
-                      token: paired.token, role: "phone", device: paired.device, nonce: nonce, keys: macKey + phoneKey)).encoded()
+                      token: current.token, role: "phone", device: current.device, nonce: nonce, keys: macKey + phoneKey)).encoded()
             else { return s.disconnect() }
             self.channel = channel
             try? s.send(answer, toPeers: [peer], with: .reliable)
-        case let .paired(token):
-            guard let pairing, pairing.peer == peer, let mac = macs[peer] else { return }
-            let record = PairedMac(device: pairing.device, token: token, mac: mac, name: peer.displayName)
-            if let failure = MacKeychain.save(record) {
-                pairingError = "Couldn't keep the pairing in the Keychain (\(failure))."
-                session?.disconnect()
-                return
-            }
-            paired = record
-            self.pairing = nil
-            nearby = []
-            // the Mac's challenge follows at once, under the new token
         default:
             break  // nothing else is taken before the channel is set up
         }
@@ -234,11 +321,11 @@ final class Link: NSObject, ObservableObject {
 extension Link: MCNearbyServiceBrowserDelegate {
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peer: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         let mac = info?["mac"]
-        DispatchQueue.main.async { MainActor.assumeIsolated { self.found(peer, mac: mac) } }
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.found(peer, mac: mac, by: browser) } }
     }
 
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, lostPeer peer: MCPeerID) {
-        DispatchQueue.main.async { MainActor.assumeIsolated { self.lost(peer) } }
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.lost(peer, by: browser) } }
     }
 }
 

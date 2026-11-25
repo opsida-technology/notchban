@@ -14,6 +14,11 @@ final class WireTests: XCTestCase {
         board.title = "Shop"
         let messages: [WireMessage] = [
             .snapshot(boards: [board], at: Date(timeIntervalSince1970: 1_790_000_123.25)),
+            .snapshot(boards: [], at: Date(timeIntervalSince1970: 1_790_000_200), ears: [
+                Ear(name: "Codex", working: 0),
+                Ear(name: "Claude", working: 3, fiveHour: 38.5, fiveHourResets: Date(timeIntervalSince1970: 1_790_009_000),
+                    week: 71, weekResets: Date(timeIntervalSince1970: 1_790_300_000), recorded: Date(timeIntervalSince1970: 1_790_000_100)),
+            ]),
             .result(id: UUID(), added: "AB-10", error: nil),
             .result(id: UUID(), added: nil, error: "This card has moved since your phone saw it."),
             .command(id: UUID(), .add(board: "/r/KANBAN.md", title: "Call the bank", notes: "before Friday", column: .ready)),
@@ -21,30 +26,38 @@ final class WireTests: XCTestCase {
             .command(id: UUID(), .note(board: "/r/KANBAN.md", card: "AB-09", text: "seen")),
             .command(id: UUID(), .due(board: "/r/KANBAN.md", card: "AB-09", day: nil)),
             .command(id: UUID(), .rename(board: "/r/KANBAN.md", name: "Books")),
-            .paired(token: Wire.newToken()),
             .challenge(nonce: Wire.newNonce(), key: Data(repeating: 5, count: 32), proof: Data(repeating: 7, count: 32)),
             .answer(key: Data(repeating: 6, count: 32), proof: Data(repeating: 9, count: 32)),
         ]
         for message in messages {
             XCTAssertEqual(try WireMessage.decode(message.encoded()), message)
         }
-        guard case let .snapshot(boards, _) = try WireMessage.decode(messages[0].encoded()) else { return XCTFail() }
+        guard case let .snapshot(boards, _, ears) = try WireMessage.decode(messages[0].encoded()) else { return XCTFail() }
+        XCTAssertNil(ears)
         XCTAssertEqual(boards[0].displayName, "Shop")
         XCTAssertTrue(boards[0].cards[0].isHumanEntered)
+    }
+
+    func testASnapshotWithoutEarsStillReads() throws {
+        // what a Mac from before the ears sends
+        let json = #"{"snapshot":{"boards":[],"at":0}}"#
+        let data = try (Data(json.utf8) as NSData).compressed(using: .lzfse) as Data
+        guard case let .snapshot(boards, _, ears) = try WireMessage.decode(data) else { return XCTFail() }
+        XCTAssertEqual(boards, [])
+        XCTAssertNil(ears)
     }
 
     func testPairedInvitationProvesTheTokenAndGoesStale() throws {
         let token = Wire.newToken(), now = Date()
         let invitation = Invitation.paired(device: "phone-1", name: "iPhone", token: token, at: now)
         let sent = try JSONDecoder().decode(Invitation.self, from: JSONEncoder().encode(invitation))
-        XCTAssertNil(sent.code)
         XCTAssertTrue(Wire.verify(sent, token: token, now: now.addingTimeInterval(30)))
         XCTAssertFalse(Wire.verify(sent, token: Wire.newToken(), now: now), "another phone's token")
         XCTAssertFalse(Wire.verify(sent, token: token, now: now.addingTimeInterval(600)), "replayed later")
         var forged = sent
         forged.device = "phone-2"
         XCTAssertFalse(Wire.verify(forged, token: token, now: now), "proof is bound to the device id")
-        XCTAssertFalse(Wire.verify(Invitation(device: "phone-1", name: "iPhone", code: "123456"), token: token))
+        XCTAssertFalse(Wire.verify(Invitation(device: "phone-1", name: "iPhone"), token: token), "no proof")
     }
 
     func testSessionProofIsBoundToTokenRoleDeviceNonceAndKeys() {
@@ -101,14 +114,21 @@ final class WireTests: XCTestCase {
         XCTAssertThrowsError(try mac.open(own), "from another session")
     }
 
-    func testCodesAndTokens() {
+    func testTokensAndThePairingCode() {
         XCTAssertEqual(Wire.newToken().count, 32)
         XCTAssertNotEqual(Wire.newToken(), Wire.newToken())
-        let code = Wire.newCode()
-        XCTAssertEqual(code.count, 6)
-        XCTAssertTrue(code.allSatisfy(\.isNumber))
-        XCTAssertTrue(Wire.same("042137", "042137"))
-        XCTAssertFalse(Wire.same("042137", "042138"))
-        XCTAssertFalse(Wire.same("042137", "42137"))
+        let mac = UUID().uuidString
+        for _ in 0..<50 {  // every base64 padding and the url-safe letters
+            let offer = PairingOffer(mac: mac, token: Wire.newToken())
+            let token = offer.link.components(separatedBy: "token=")[1]
+            XCTAssertFalse(token.contains("+") || token.contains("/") || token.contains("="), token)
+            XCTAssertEqual(PairingOffer(link: offer.link), offer)
+        }
+        let good = PairingOffer(mac: mac, token: Wire.newToken()).link
+        XCTAssertNil(PairingOffer(link: good.replacingOccurrences(of: "notchban:", with: "https:")), "another scheme")
+        XCTAssertNil(PairingOffer(link: good.replacingOccurrences(of: mac, with: "not-a-mac")))
+        XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)&token=AAAA"), "a short token")
+        XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)"))
+        XCTAssertNil(PairingOffer(link: "123456"))
     }
 }

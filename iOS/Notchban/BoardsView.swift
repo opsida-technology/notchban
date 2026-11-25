@@ -5,8 +5,8 @@ import SwiftUI
 /// number, the column mix as a thick segmented bar. Long-press a tile to rename its board.
 struct BoardsView: View {
     @EnvironmentObject var link: Link
+    @EnvironmentObject var nav: Nav
     @State private var renaming: Board?
-    @State private var open: BoardRef?
     @State private var pressed: String?
 
     private var boards: [Board] {
@@ -31,16 +31,15 @@ struct BoardsView: View {
                     .scaleEffect(pressed == board.path ? 0.97 : 1)
                     .animation(.spring(response: 0.3, dampingFraction: 0.7), value: pressed)
                     .contentShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-                    .onTapGesture { open = BoardRef(path: board.path) }
+                    .onTapGesture { nav.boards.append(BoardRef(path: board.path)) }
                     .onLongPressGesture(minimumDuration: 0.45) {
                         if link.isConnected { renaming = board }
                     } onPressingChanged: { pressed = $0 ? board.path : nil }
                     .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { open = BoardRef(path: board.path) }
+                    .accessibilityAction { nav.boards.append(BoardRef(path: board.path)) }
                     .accessibilityAction(named: "Rename") { if link.isConnected { renaming = board } }
             }
         }
-        .navigationDestination(item: $open) { BoardScreen(path: $0.path) }
         .safeAreaInset(edge: .bottom, spacing: 0) { TabBar() }
         .sensoryFeedback(.impact(weight: .medium), trigger: renaming?.path) { _, new in new != nil }
         .islandPrompt(isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -50,7 +49,7 @@ struct BoardsView: View {
 
     private var subtitle: String {
         let n = "\(boards.count) board\(boards.count == 1 ? "" : "s") on your Mac. Hold one to rename it."
-        return link.isConnected ? n : "\(boards.count) board\(boards.count == 1 ? "" : "s") on your Mac. Changes wait until your Mac is back."
+        return link.isConnected ? n : "\(boards.count) board\(boards.count == 1 ? "" : "s") on your Mac. Verdicts wait until your Mac is back; other changes need it."
     }
 }
 

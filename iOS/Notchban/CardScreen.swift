@@ -34,7 +34,7 @@ struct CardScreen: View {
                 if !card.checklist.isEmpty { checklist(card) }
                 ForEach(Array(noteLines(card).enumerated()), id: \.offset) { _, line in NoteLine(text: line) }
                 ForEach(card.proof, id: \.self) { proof in
-                    NoteLine(text: proof, systemImage: "checkmark.seal")
+                    NoteLine(text: proof, systemImage: "checkmark.seal", links: true)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { dock(card) }
@@ -175,7 +175,8 @@ struct CardScreen: View {
     private func dock(_ card: Card) -> some View {
         VStack(spacing: 8) {
             if !link.isConnected {
-                Label("Mac not nearby – changes wait", systemImage: "wifi.slash").labelStyle(TightLabel())
+                Label(card.column == .review ? "Mac not nearby – a verdict waits on your phone" : "Mac not nearby – this needs your Mac",
+                      systemImage: "wifi.slash").labelStyle(TightLabel())
                     .font(Theme.metaBold).foregroundStyle(Theme.ember.text)
                     .padding(.top, 6)
             }
@@ -192,7 +193,7 @@ struct CardScreen: View {
                         .buttonStyle(WhiteCapsuleStyle())
                 }
             }
-            .disabled(!link.isConnected || sending != nil)
+            .disabled(sending != nil || (card.column != .review && !link.isConnected))
         }
         .padding(6)
         .background {
@@ -210,7 +211,7 @@ struct CardScreen: View {
 
     private func capsule(_ verdict: Verdict, _ title: String, _ icon: String, _ hint: String, action: @escaping () -> Void) -> some View {
         let tone = Theme.verdict(verdict)
-        let primary = verdict == .done
+        let primary = verdict == .approved
         return Button(action: action) {
             VStack(spacing: 4) {
                 Group {
@@ -219,7 +220,7 @@ struct CardScreen: View {
                     }
                 }
                 .frame(height: 20)
-                .foregroundStyle(primary ? Color(hex: 0x0A7647) : tone.fill)
+                .foregroundStyle(tone.fill)
                 Text(title).font(Theme.font(13, .bold)).lineLimit(1).minimumScaleFactor(0.8)
                     .foregroundStyle(primary ? Theme.notch : Theme.onNotch)
             }
@@ -241,7 +242,7 @@ struct CardScreen: View {
     private func review(_ verdict: Verdict) {
         sending = verdict
         Task {
-            let outcome = await link.run(.review(board: ref.board, card: ref.card, verdict: verdict, note: ""))
+            let outcome = await link.review(board: ref.board, card: ref.card, verdict: verdict, note: "")
             sending = nil
             if let error = outcome.error { problem = error } else { dismiss() }
         }
@@ -264,13 +265,26 @@ struct PressDown: ButtonStyle {
 struct NoteLine: View {
     let text: String
     var systemImage = "note.text"
+    /// Web addresses in the line open in the browser (a proof line often names a pull request).
+    var links = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 9) {
             Image(systemName: systemImage).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.fg3)
-            styled.font(Theme.needs).foregroundStyle(Theme.fg2).fixedSize(horizontal: false, vertical: true)
+            Group { if links { Text(linked(text)) } else { styled } }
+                .font(Theme.needs).foregroundStyle(Theme.fg2).tint(Theme.sky.text).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 4)
+    }
+
+    private func linked(_ s: String) -> AttributedString {
+        var out = AttributedString(s)
+        let found = (try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue))?
+            .matches(in: s, range: NSRange(s.startIndex..., in: s)) ?? []
+        for m in found {
+            if let url = m.url, let r = Range(m.range, in: s), let ar = Range(r, in: out) { out[ar].link = url }
+        }
+        return out
     }
 
     private var styled: Text {
@@ -327,7 +341,7 @@ struct NoteSheet: View {
                 }
             }
             .buttonStyle(WhiteCapsuleStyle())
-            .disabled(empty || sending || !link.isConnected)
+            .disabled(empty || sending || (verdict == nil && !link.isConnected))
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 18)
@@ -338,9 +352,12 @@ struct NoteSheet: View {
     private func send() {
         sending = true
         Task {
-            let command: BoardCommand = verdict.map { .review(board: ref.board, card: ref.card, verdict: $0, note: text) }
-                ?? .note(board: ref.board, card: ref.card, text: text)
-            let outcome = await link.run(command)
+            let outcome: Outcome
+            if let verdict {
+                outcome = await link.review(board: ref.board, card: ref.card, verdict: verdict, note: text)
+            } else {
+                outcome = await link.run(.note(board: ref.board, card: ref.card, text: text))
+            }
             sending = false
             if let error = outcome.error { problem = error } else { dismiss(); done() }
         }

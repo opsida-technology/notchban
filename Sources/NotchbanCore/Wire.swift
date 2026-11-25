@@ -2,18 +2,17 @@ import CryptoKit
 import Foundation
 
 /// What the Mac and a paired phone say to each other over MultipeerConnectivity (encryption required). One message per
-/// send, JSON compressed with LZFSE. Only `paired`, `challenge` and `answer` travel as they are; everything after the
+/// send, JSON compressed with LZFSE. Only `challenge` and `answer` travel as they are; everything after the
 /// handshake goes through a `Channel`. The Mac's `KANBAN.md` files stay the only truth: the phone holds a snapshot and
 /// sends commands.
 public enum WireMessage: Codable, Equatable, Sendable {
-    /// Mac → phone: every board the Mac shows, as of `at`. On connect and after every change.
-    case snapshot(boards: [Board], at: Date)
+    /// Mac → phone: every board the Mac shows, as of `at`, and what the notch's ears show. On connect and after every
+    /// change.
+    case snapshot(boards: [Board], at: Date, ears: [Ear]? = nil)
     /// Mac → phone: how command `id` went; `added` is the id of a card it added, `error` a sentence for the owner.
     case result(id: UUID, added: String?, error: String?)
     /// Phone → Mac.
     case command(id: UUID, BoardCommand)
-    /// Mac → phone, once, right after the pairing code matched: the secret the phone proves from then on.
-    case paired(token: Data)
     /// Mac → phone, as soon as the session is up: a fresh nonce and the Mac's one-time key, signed with the token.
     case challenge(nonce: Data, key: Data, proof: Data)
     /// Phone → Mac: the phone's one-time key, signed with the token over both keys. Both ends then hold the same
@@ -29,17 +28,36 @@ public enum WireMessage: Codable, Equatable, Sendable {
     }
 }
 
-/// The phone's invitation context. Pairing sends the 6-digit `code`; a paired phone sends `proof`, an HMAC of its
-/// device id and the time keyed with its token, so the token itself never travels again.
+/// One of the notch's ears, for the phone: a provider's live agents and its two limits as the Mac last read them.
+public struct Ear: Codable, Equatable, Sendable {
+    public var name: String
+    /// Sessions and subagents at work now.
+    public var working: Int
+    /// Percent used of the 5-hour and the weekly limit, and when each rolls over; nil when the Mac has no figure.
+    public var fiveHour: Double?
+    public var fiveHourResets: Date?
+    public var week: Double?
+    public var weekResets: Date?
+    /// When the provider's own tool last wrote the limits.
+    public var recorded: Date?
+
+    public init(name: String, working: Int, fiveHour: Double? = nil, fiveHourResets: Date? = nil, week: Double? = nil,
+                weekResets: Date? = nil, recorded: Date? = nil) {
+        self.name = name; self.working = working; self.fiveHour = fiveHour; self.fiveHourResets = fiveHourResets
+        self.week = week; self.weekResets = weekResets; self.recorded = recorded
+    }
+}
+
+/// The phone's invitation context: its device id and `proof`, an HMAC of the device id and the time keyed with its
+/// token, so the token itself never travels. Pairing sends the same, keyed with the token from the Mac's QR code.
 public struct Invitation: Codable, Equatable, Sendable {
     public var device: String
     public var name: String
-    public var code: String?
     public var time: Int?
     public var proof: Data?
 
-    public init(device: String, name: String, code: String? = nil, time: Int? = nil, proof: Data? = nil) {
-        self.device = device; self.name = name; self.code = code; self.time = time; self.proof = proof
+    public init(device: String, name: String, time: Int? = nil, proof: Data? = nil) {
+        self.device = device; self.name = name; self.time = time; self.proof = proof
     }
 
     /// A paired phone's invitation, signed now.
@@ -84,21 +102,38 @@ public enum Wire {
     /// A fresh random challenge.
     public static func newNonce() -> Data { newToken() }
 
-    /// Compares two secrets without leaking where they differ.
-    public static func same(_ a: String, _ b: String) -> Bool {
-        let a = Array(a.utf8), b = Array(b.utf8)
-        guard a.count == b.count else { return false }
-        return zip(a, b).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
-    }
-
     /// A fresh 32-byte pairing token.
     public static func newToken() -> Data {
         SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
     }
+}
 
-    /// A 6-digit pairing code from the system's secure generator.
-    public static func newCode() -> String {
-        String(format: "%06d", Int.random(in: 0..<1_000_000))
+/// What the Mac's pairing QR code holds: the Mac's id and a fresh token. The token goes from the Mac's screen to the
+/// phone's camera and never over the air, so no one nearby can learn it, even while the two pair.
+public struct PairingOffer: Equatable, Sendable {
+    public var mac: String
+    public var token: Data
+
+    public init(mac: String, token: Data) {
+        self.mac = mac; self.token = token
+    }
+
+    /// `notchban:pair?mac=<id>&token=<base64url>`
+    public var link: String {
+        let token = token.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return "notchban:pair?mac=\(mac)&token=\(token)"
+    }
+
+    /// Reads a scanned code; nil for anything that is not a well-formed pairing link.
+    public init?(link: String) {
+        guard let parts = URLComponents(string: link), parts.scheme == "notchban", parts.path == "pair",
+              let mac = parts.queryItems?.first(where: { $0.name == "mac" })?.value, UUID(uuidString: mac) != nil,
+              var text = parts.queryItems?.first(where: { $0.name == "token" })?.value else { return nil }
+        text = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        text += String(repeating: "=", count: (4 - text.count % 4) % 4)
+        guard let token = Data(base64Encoded: text), token.count == 32 else { return nil }
+        self.init(mac: mac, token: token)
     }
 }
 

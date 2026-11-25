@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreImage.CIFilterBuiltins
 import CryptoKit
 import MultipeerConnectivity
 import NotchbanCore
@@ -7,13 +8,13 @@ import Security
 import SwiftUI
 
 /// The Mac's side of the iPhone link: MultipeerConnectivity (Wi-Fi, peer-to-peer Wi-Fi, Bluetooth; no server), encryption
-/// required. A phone pairs once with a 6-digit code shown here; after that the Mac accepts only invitations that prove a
-/// paired phone's token. Each phone gets the boards on connect and after every change, and its commands go through
+/// required. A phone pairs once by scanning a QR code shown here, which hands it a token without sending it over the air;
+/// from then on the Mac accepts only invitations that prove a paired phone's token. Each phone gets the boards on connect and after every change, and its commands go through
 /// `Model.apply`, so the `KANBAN.md` files stay the only truth.
 @MainActor
 final class Pairing: NSObject, ObservableObject {
-    /// The open pairing window's code; nil when no phone may pair.
-    @Published private(set) var code: String?
+    /// The QR code the open pairing window shows; nil when no phone may pair.
+    @Published private(set) var offer: PairingOffer?
     @Published private(set) var status = ""
     /// Paired phones, device id → name. Their tokens are in the Keychain, never here.
     @Published private(set) var phones = UserDefaults.standard.dictionary(forKey: "pairedPhones") as? [String: String] ?? [:] {
@@ -26,8 +27,8 @@ final class Pairing: NSObject, ObservableObject {
         let session: MCSession
         let device: String
         let name: String
-        /// Came in with the pairing code: gets its token once connected.
-        let pairing: Bool
+        /// Came in with the QR code's token: the phone is kept once it proves the token in this session.
+        let pairing: Data?
         /// The challenge a paired phone must answer in this session before anything else, and the Mac's one-time key for it.
         var nonce: Data?
         var ephemeral: Curve25519.KeyAgreement.PrivateKey?
@@ -51,7 +52,6 @@ final class Pairing: NSObject, ObservableObject {
     private var tokens: [String: Data] = [:]
     /// Proofs already used, so an overheard invitation cannot be replayed.
     private var spent: [Data: Date] = [:]
-    private var misses = 0
     private var expiry: DispatchWorkItem?
     private var window: NSWindow?
     private var watch: AnyCancellable?
@@ -63,21 +63,23 @@ final class Pairing: NSObject, ObservableObject {
 
     func start() {
         advertise()
-        watch = model.$boards.dropFirst().debounce(for: .seconds(1), scheduler: RunLoop.main).sink { [weak self] _ in
-            self?.broadcast()
-        }
+        // a board changed, or what the ears show did (not every read of the sessions, which changes their notes)
+        let ears = model.$providers.map { $0.map(Self.ear) }.removeDuplicates().map { _ in () }
+        watch = model.$boards.map { _ in () }.merge(with: ears).dropFirst(2)
+            .debounce(for: .seconds(1), scheduler: RunLoop.main).sink { [weak self] in self?.broadcast() }
         #if DEBUG
-        // for testing a debug build against the simulator: NOTCHBAN_PAIR=1 opens the window and prints the code
+        // for testing a debug build against the simulator, which has no camera: NOTCHBAN_PAIR=1 opens the window and
+        // prints the QR code's link
         if ProcessInfo.processInfo.environment["NOTCHBAN_PAIR"] == "1" {
             showWindow()
-            NSLog("pairing code: %@", code ?? "-")
+            NSLog("pairing link: %@", offer?.link ?? "-")
         }
         #endif
     }
 
     /// Advertise only while a phone is paired or may pair.
     private func advertise() {
-        let wanted = !phones.isEmpty || code != nil
+        let wanted = !phones.isEmpty || offer != nil
         if wanted, advertiser == nil {
             let a = MCNearbyServiceAdvertiser(peer: me, discoveryInfo: ["mac": macID], serviceType: Wire.service)
             a.delegate = self
@@ -91,10 +93,9 @@ final class Pairing: NSObject, ObservableObject {
 
     // MARK: pairing window
 
-    /// A fresh code, good once, for two minutes.
+    /// A fresh QR code, good once, for two minutes.
     func open() {
-        code = Wire.newCode()
-        misses = 0
+        offer = PairingOffer(mac: macID, token: Wire.newToken())
         status = "Waiting for your iPhone…"
         advertise()
         expiry?.cancel()
@@ -104,7 +105,7 @@ final class Pairing: NSObject, ObservableObject {
     }
 
     func close(_ message: String = "") {
-        code = nil
+        offer = nil
         expiry?.cancel()
         status = message
         advertise()
@@ -123,7 +124,7 @@ final class Pairing: NSObject, ObservableObject {
 
     func showWindow() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 320), styleMask: [.titled, .closable],
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 480), styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
             w.title = "Pair iPhone"
             w.isReleasedWhenClosed = false
@@ -133,7 +134,7 @@ final class Pairing: NSObject, ObservableObject {
             w.center()
             window = w
         }
-        if code == nil { open() }
+        if offer == nil { open() }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -141,36 +142,35 @@ final class Pairing: NSObject, ObservableObject {
     // MARK: invitations
 
     private func invited(_ peer: MCPeerID, _ invitation: Invitation?, _ answer: @escaping (Bool, MCSession?) -> Void) {
-        guard let invitation else { return answer(false, nil) }
-        if let proof = invitation.proof {
-            let now = Date()
-            spent = spent.filter { now.timeIntervalSince($0.value) < TimeInterval(Wire.skew * 2) }
-            guard phones[invitation.device] != nil, spent[proof] == nil, let token = token(for: invitation.device),
-                  Wire.verify(invitation, token: token, now: now) else { return answer(false, nil) }
+        let now = Date()
+        spent = spent.filter { now.timeIntervalSince($0.value) < TimeInterval(Wire.skew * 2) }
+        guard let invitation, let proof = invitation.proof, spent[proof] == nil else { return answer(false, nil) }
+        if phones[invitation.device] != nil {
+            guard let token = token(for: invitation.device), Wire.verify(invitation, token: token, now: now) else { return answer(false, nil) }
             spent[proof] = now
-            accept(peer, invitation, pairing: false, answer)
-        } else if let typed = invitation.code, let code {
-            guard Wire.same(typed, code) else {
-                misses += 1
-                if misses >= 5 { close("Too many wrong codes. Show a new one to pair.") } else { status = "Wrong code from \(invitation.name)." }
-                return answer(false, nil)
-            }
-            self.code = nil  // good once
+            accept(peer, invitation, pairing: nil, answer)
+        } else if let offer, Wire.verify(invitation, token: offer.token, now: now) {
+            // only a phone that read the QR code can sign with its token
+            spent[proof] = now
+            self.offer = nil  // good once
             expiry?.cancel()
             status = "Connecting to \(invitation.name)…"
-            accept(peer, invitation, pairing: true, answer)
+            accept(peer, invitation, pairing: offer.token, answer)
         } else {
             answer(false, nil)
         }
     }
 
-    private func accept(_ peer: MCPeerID, _ invitation: Invitation, pairing: Bool, _ answer: (Bool, MCSession?) -> Void) {
+    private func accept(_ peer: MCPeerID, _ invitation: Invitation, pairing: Data?, _ answer: (Bool, MCSession?) -> Void) {
         links[peer]?.session.disconnect()
         let session = MCSession(peer: me, securityIdentity: nil, encryptionPreference: .required)
         session.delegate = self
         links[peer] = Link(session: session, device: invitation.device, name: String(invitation.name.prefix(60)), pairing: pairing)
         answer(true, session)
     }
+
+    /// The token this link must prove: the QR code's while pairing, else the paired phone's.
+    private func secret(_ link: Link) -> Data? { link.pairing ?? token(for: link.device) }
 
     private func token(for device: String) -> Data? {
         if let t = tokens[device] { return t }
@@ -185,22 +185,9 @@ final class Pairing: NSObject, ObservableObject {
         guard var link = links[peer], link.session === session else { return }  // not an older, replaced session
         switch state {
         case .connected:
-            if link.pairing {
-                let token = Wire.newToken()
-                if let failure = PhoneKeychain.save(token, for: link.device) {
-                    status = "Couldn't keep the pairing in the Keychain (\(failure)). Try again."
-                    link.session.disconnect()
-                    links[peer] = nil
-                    return
-                }
-                tokens[link.device] = token
-                phones[link.device] = link.name
-                sendPlain(.paired(token: token), to: peer, in: link.session)
-                close("Paired with \(link.name).")
-            }
             // The invitation proof is not tied to this session, so both ends prove the token again inside it, over
             // one-time keys that become the session's own (see `Channel`).
-            guard let token = token(for: link.device) else { return drop(peer) }
+            guard let token = secret(link) else { return drop(peer) }
             let nonce = Wire.newNonce(), own = Curve25519.KeyAgreement.PrivateKey()
             let key = own.publicKey.rawRepresentation
             link.nonce = nonce
@@ -217,7 +204,7 @@ final class Pairing: NSObject, ObservableObject {
         case .notConnected:
             links[peer] = nil
             if !links.values.contains(where: { $0.device == link.device && $0.ready }) { connected.remove(link.device) }
-            if link.pairing && !link.ready { status = "The iPhone didn't connect. Show a new code to try again." }
+            if link.pairing != nil && !link.ready { status = "The iPhone didn't connect. Show a new code to try again." }
         case .connecting:
             break
         @unknown default:
@@ -228,12 +215,21 @@ final class Pairing: NSObject, ObservableObject {
     /// The link checks out: it gets snapshots and may send commands, all sealed in `channel`.
     private func open(_ peer: MCPeerID, _ channel: Channel) {
         guard var link = links[peer] else { return }
+        if let token = link.pairing {
+            if let failure = PhoneKeychain.save(token, for: link.device) {
+                status = "Couldn't keep the pairing in the Keychain (\(failure)). Show a new code to try again."
+                return drop(peer)
+            }
+            tokens[link.device] = token
+            phones[link.device] = link.name
+            status = "Paired with \(link.name)."
+        }
         link.channel = channel
         link.nonce = nil
         link.ephemeral = nil
         links[peer] = link
         connected.insert(link.device)
-        send(.snapshot(boards: model.boards, at: Date()), to: peer)
+        send(snapshot, to: peer)
     }
 
     private func drop(_ peer: MCPeerID) {
@@ -245,7 +241,7 @@ final class Pairing: NSObject, ObservableObject {
         guard var link = links[peer], link.session === session else { return }
         guard var channel = link.channel else {
             guard case let .answer(phoneKey, proof)? = try? WireMessage.decode(data), let nonce = link.nonce,
-                  let own = link.ephemeral, let token = token(for: link.device) else { return drop(peer) }
+                  let own = link.ephemeral, let token = secret(link) else { return drop(peer) }
             let macKey = own.publicKey.rawRepresentation
             guard Wire.verify(sessionProof: proof, token: token, role: "phone", device: link.device, nonce: nonce, keys: macKey + phoneKey),
                   let channel = try? Channel(role: "mac", own: own, mac: macKey, phone: phoneKey, token: token,
@@ -263,8 +259,15 @@ final class Pairing: NSObject, ObservableObject {
     }
 
     private func broadcast() {
-        let message = WireMessage.snapshot(boards: model.boards, at: Date())
+        let message = snapshot
         for peer in links.filter(\.value.ready).keys { send(message, to: peer) }
+    }
+
+    private var snapshot: WireMessage { .snapshot(boards: model.boards, at: Date(), ears: model.providers.map(Self.ear)) }
+
+    private static func ear(_ p: Provider) -> NotchbanCore.Ear {
+        NotchbanCore.Ear(name: p.name, working: p.active, fiveHour: p.fiveHour?.used, fiveHourResets: p.fiveHour?.resets,
+            week: p.week?.used, weekResets: p.week?.resets, recorded: p.recorded)
     }
 
     /// Sealed in the peer's channel; never sent before the handshake is done.
@@ -338,7 +341,7 @@ extension Pairing: MCSessionDelegate {
 
 extension Pairing: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        if code != nil { close() }
+        if offer != nil { close() }
     }
 }
 
@@ -373,17 +376,18 @@ enum PhoneKeychain {
     }
 }
 
-/// "Pair iPhone…": the code, what is happening, and the phones already paired.
+/// "Pair iPhone…": the QR code, what is happening, and the phones already paired.
 struct PairView: View {
     @ObservedObject var pairing: Pairing
 
     var body: some View {
         VStack(spacing: 14) {
-            if let code = pairing.code {
-                Text("Open Notchban on your iPhone and type this code").font(.headline).multilineTextAlignment(.center)
-                Text(code.prefix(3) + " " + code.suffix(3))
-                    .font(.system(size: 44, weight: .bold, design: .monospaced)).textSelection(.enabled)
-                    .accessibilityLabel("Pairing code \(code.map(String.init).joined(separator: " "))")
+            if let offer = pairing.offer {
+                Text("Scan this with Notchban on your iPhone").font(.headline).multilineTextAlignment(.center)
+                Image(nsImage: Self.qr(offer.link)).interpolation(.none).resizable()
+                    .frame(width: 200, height: 200)
+                    .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityLabel("Pairing QR code")
                 Text("It works once, for two minutes.").font(.callout).foregroundStyle(.secondary)
             } else {
                 Button("Show a Pairing Code") { pairing.open() }.controlSize(.large).keyboardShortcut(.defaultAction)
@@ -409,5 +413,14 @@ struct PairView: View {
         }
         .padding(20)
         .frame(width: 380)
+    }
+
+    /// Black on white, one pixel per module; the view scales it up without smoothing.
+    static func qr(_ text: String) -> NSImage {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let image = filter.outputImage, let cg = CIContext().createCGImage(image, from: image.extent) else { return NSImage() }
+        return NSImage(cgImage: cg, size: image.extent.size)
     }
 }

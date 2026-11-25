@@ -91,6 +91,20 @@ final class BoardState: ObservableObject {
         if collapsed.contains(c) { collapsed.remove(c) } else { collapsed.insert(c) }
     }
 
+    /// Set by the app: a verdict on a card (board path, card id), and ⌘Z.
+    var onVerdict: ((Verdict, String, String) -> Void)?
+    var onUndo: (() -> Void)?
+
+    /// Opens the next card waiting for a verdict on any board, the earliest review day first; again for the one after.
+    func nextReview(_ boards: [Board]) {
+        let queue = boards.flatMap { b in b.cards.filter { $0.column == .review }.map { (path: b.path, card: $0) } }
+            .sorted { ($0.card.due ?? "9999") < ($1.card.due ?? "9999") }
+        guard !queue.isEmpty else { return }
+        let at = queue.firstIndex { $0.path == path && $0.card.id == selection }
+        let next = queue[((at ?? -1) + 1) % queue.count]
+        open(next.card.id, on: next.path)
+    }
+
     /// The window's keys. Returns true when it used the event.
     func handle(_ event: NSEvent, board: Board?, boards: [Board], textFocused: Bool) -> Bool {
         let cmd = event.modifierFlags.contains(.command)
@@ -104,11 +118,15 @@ final class BoardState: ObservableObject {
             paletteIndex = min(max(paletteIndex + (code == 125 ? 1 : -1), 0), paletteCount - 1)
             return true
         }
-        if cmd { return false }
+        if cmd {
+            if key == "z", !textFocused { onUndo?(); return true }
+            return false
+        }
         if textFocused {
             if code == 36 || code == 125 { focusSearch = false; NSApp.keyWindow?.makeFirstResponder(nil); return true }
             return false
         }
+        if key == "n" { nextReview(boards); return true }
         guard let board else { return false }
         let graph = BoardGraph(board)
         switch (key, code) {
@@ -116,6 +134,9 @@ final class BoardState: ObservableObject {
         case ("k", _), (_, 126): move(0, -1, board, graph)
         case ("h", _), (_, 123): move(-1, 0, board, graph)
         case ("l", _), (_, 124): move(1, 0, board, graph)
+        case ("1", _), ("2", _), ("3", _), ("4", _):  // Done, Approve, Changes, Hold on the selected Human Review card
+            guard let id = selection, board.card(id)?.column == .review, let n = Int(key) else { return false }
+            onVerdict?([.done, .approved, .changes, .hold][n - 1], board.path, id)
         case ("/", _): focusSearch = true
         case (" ", _), (_, 36): if selection != nil { detail.toggle() } else { move(0, 0, board, graph) }
         case ("g", _):

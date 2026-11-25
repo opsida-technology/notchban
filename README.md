@@ -16,7 +16,8 @@ sessions, their subagents, their 5-hour and weekly limits. It writes a board onl
 A pill over the notch with an ear on each side: Codex on the left, Claude on the right. Each ear shows the
 5-hour and weekly limits as two rings, the 5-hour figure with when it resets, and how many agents work now.
 Put the pointer on the pill (or click it, or ⌥⌘B) and the whole board hangs from the notch; Esc, a click
-elsewhere or the pointer leaving closes it. Figures more than half an hour old are dimmed.
+elsewhere or the pointer leaving closes it. Figures more than half an hour old are dimmed. A tab under the pill counts the cards waiting for your review and
+the stale leases. The board switcher's menu can also send a notification when a card newly needs you.
 
 ## The board
 
@@ -54,6 +55,9 @@ The screenshots show made-up boards and sessions.
 | f | only the selected card's chain |
 | r | only ready and unblocked |
 | [ ] | previous / next board |
+| n | next card waiting in Human Review, on any board |
+| 1 2 3 4 | on a Human Review card: Done, Approve, Changes, Hold |
+| ⌘Z | undo your last verdict |
 | Esc | back out one layer |
 | ⌘Q | quit (also in the board switcher's menu) |
 
@@ -92,6 +96,28 @@ The metadata line is optional JSON: `owner`, `task`, `lease`, `after`/`before` (
 The full format, written as a Claude Code skill, is in [docs/kanban-skill.md](docs/kanban-skill.md); the app
 offers to install it the first time the board opens, so your agents keep the board current.
 
+## On your iPhone
+
+A companion app for iPhone (iOS 17 or later) shows the same boards when you are away from the desk and lets you
+act on them: approve a card in Human Review or send it back with a note, add a card, leave a note, set a due date.
+It also shows what the notch's ears show: Codex and Claude agents at work and their 5-hour and weekly limits.
+Your Mac stays the only place the boards live; the phone keeps the last copy it saw and sends your changes to the
+Mac, which writes them into the `KANBAN.md` like any other edit of yours.
+
+- **Pairing**: on the Mac, the board switcher's menu › Pair iPhone… shows a QR code; scan it with the app. The code
+  works once, for two minutes. It carries a fresh secret from the Mac's screen to the phone's camera, so the secret
+  never goes over the air. "Forget This iPhone" in the same window undoes it.
+- **The link**: Wi-Fi or Bluetooth, straight between the two (MultipeerConnectivity). No account, no server, no
+  cloud. Each session agrees new keys, both sides prove the paired secret over them, and every message after that
+  is sealed (ChaChaPoly), so nobody nearby can read, change or replay it.
+- **Verdicts**: swipe the card (right approves, left asks for changes, up is done, down holds). A verdict waits
+  five seconds with an Undo bar before it is sent.
+- **Away from the Mac**: the phone shows the last boards it received. Verdicts you give are kept on the phone and
+  sent, in order, when the Mac is back; a card you already decided on the Mac is skipped and named. Other changes
+  need the Mac nearby and awake.
+
+The app is not in the App Store yet; its source is in [iOS/](iOS), built with [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+
 ## Where the data comes from
 
 Everything is read on your Mac, and nothing is written except where the app asks first or you act on a board
@@ -117,6 +143,7 @@ give a board stays in the app's settings.
 swift test
 swift run notchban          # or: swift run notchban myapp, to open that board
 scripts/package.sh          # Notchban.app in ./build; set NOTARY_PROFILE to sign and notarize
+cd iOS && xcodegen generate # then open Notchban.xcodeproj and run on your iPhone
 ```
 
 ## License

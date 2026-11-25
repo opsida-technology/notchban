@@ -54,8 +54,8 @@ struct Ear: View {
                     }
                 }
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(provider.name) \(Limit.percent(provider.fiveHour, now: now))").font(.system(size: 10.5, weight: .semibold))
-                Text("↻ \(Limit.resets(provider.fiveHour, now: now))").font(.system(size: 9)).foregroundStyle(.white.opacity(0.5))
+                Text("\(provider.name) \(Limit.percent(provider.fiveHour, now: now))").font(.system(size: 12, weight: .semibold))
+                Text("↻ \(Limit.resets(provider.fiveHour, now: now))").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.7))
             }
             .fixedSize()
         }
@@ -140,11 +140,31 @@ struct NotchView: View {
                 }
             }
         } else {
-            ears.frame(height: notch.height).frame(width: width).background(NotchOutline(pill: width, notch: notch.height, progress: 0).fill(.black))
-                .contentShape(Rectangle()).onTapGesture(perform: open)
-                .accessibilityAddTraits(.isButton).accessibilityLabel("Open the board")
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            ZStack(alignment: .top) {
+                ears.frame(height: notch.height).frame(width: width).background(NotchOutline(pill: width, notch: notch.height, progress: 0).fill(.black))
+                if model.reviewCount + model.staleCount > 0 { tab.offset(y: notch.height - 2) }
+            }
+            .contentShape(Rectangle()).onTapGesture(perform: open)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton).accessibilityLabel("Open the board. \(model.reviewCount) waiting for you, \(model.staleCount) abandoned")
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+    }
+
+    /// Hangs under the pill's right end while something needs the owner: cards in Human Review on any board, and cards
+    /// whose agent's lease ran out.
+    private var tab: some View {
+        HStack(spacing: 5) {
+            if model.reviewCount > 0 { badge("\(model.reviewCount) to review", Theme.indigo) }
+            if model.staleCount > 0 { badge("\(model.staleCount) stale", Theme.alarm) }
+        }
+        .frame(width: width, alignment: .trailing).padding(.trailing, 16)
+    }
+
+    private func badge(_ text: String, _ tint: Color) -> some View {
+        Text(text).font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+            .padding(.horizontal, 8).frame(height: 17)
+            .background(Capsule().fill(tint))
     }
 
     private var ears: some View {

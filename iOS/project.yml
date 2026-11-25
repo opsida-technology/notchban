@@ -36,6 +36,7 @@ targets:
         NSHumanReadableCopyright: 2026 Özgün Kasap
         NSLocalNetworkUsageDescription: Notchban talks to your paired Mac over Wi-Fi or Bluetooth to show your boards, with no server in between.
         NSBonjourServices: [_notchban._tcp, _notchban._udp]
+        NSCameraUsageDescription: Notchban reads the pairing code your Mac shows. Nothing is recorded or kept.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false

@@ -42,6 +42,17 @@ final class Model: ObservableObject {
             publish(boards)
         }
     }
+    /// Off unless the person turns it on: a notification when a card lands in Human Review.
+    @Published var notifyReview = UserDefaults.standard.bool(forKey: "notifyReview") {
+        didSet {
+            UserDefaults.standard.set(notifyReview, forKey: "notifyReview")
+            if notifyReview { Notifier.ask() }
+        }
+    }
+    /// Human Review cards (board path and id) as of the last change, to tell which ones are new.
+    private var inReview: Set<String>?
+    /// The last verdict given on this Mac, to take back: the file as it was and as the verdict left it.
+    private var lastReview: (url: URL, before: String, after: String)?
     private var watcher: FileWatcher?
     private var timers: [Timer] = []
 
@@ -138,6 +149,8 @@ final class Model: ObservableObject {
 
     var working: Int { boards.reduce(0) { $0 + $1.count(.progress) } }
     var staleCount: Int { boards.reduce(0) { $0 + $1.stale(at: now).count } }
+    /// Cards in Human Review on every board: what waits for the owner.
+    var reviewCount: Int { boards.reduce(0) { $0 + $1.count(.review) } }
 
     private func changed(_ paths: [String]) {
         let touched = Set(paths.filter { $0.hasSuffix("/KANBAN.md") })
@@ -159,12 +172,17 @@ final class Model: ObservableObject {
         let named = found.map { b in var b = b; b.title = titles[b.path]; return b }
         guard named != boards else { return }
         boards = named
+        let review = Set(named.flatMap { b in b.cards.filter { $0.column == .review }.map { b.path + "|" + $0.id } })
+        if notifyReview, let before = inReview {
+            for b in named { for c in b.cards where c.column == .review && !before.contains(b.path + "|" + c.id) { Notifier.post(b, c) } }
+        }
+        inReview = review
     }
 
     /// The owner's command (from the phone or the Mac) on a board this app shows: renames are kept here, the rest is
     /// written into that board's file. Returns the id of a card it added. Never touches a path it does not show.
     @discardableResult
-    func apply(_ command: BoardCommand) throws -> String? {
+    func apply(_ command: BoardCommand, remember: Bool = false) throws -> String? {
         guard let board = boards.first(where: { $0.path == command.board }) else { throw BoardEditor.Failure.notABoard }
         if case let .rename(_, name) = command {
             let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -174,10 +192,12 @@ final class Model: ObservableObject {
         let url = URL(fileURLWithPath: board.path)
         let day = DateFormatter()
         day.dateFormat = "yyyy-MM-dd"
-        let (text, added) = try BoardEditor.apply(command, to: try String(contentsOf: url, encoding: .utf8),
+        let original = try String(contentsOf: url, encoding: .utf8)
+        let (text, added) = try BoardEditor.apply(command, to: original,
                                                   by: NSFullUserName().split(separator: " ").first.map(String.init) ?? "owner",
                                                   today: day.string(from: Date()))
         try text.write(to: url, atomically: true, encoding: .utf8)
+        if remember, case .review = command { lastReview = (url, original, text) }
         if let fresh = Scanner.board(at: url) { publish(boards.map { $0.path == board.path ? Board(path: $0.path, name: $0.name, cards: fresh.cards) : $0 }) }
         return added
     }
@@ -200,12 +220,41 @@ final class Model: ObservableObject {
 
     /// A command from the Mac's own buttons; a failure is shown, never swallowed.
     func perform(_ command: BoardCommand) {
-        do { _ = try apply(command) } catch {
-            let alert = NSAlert()
-            alert.messageText = "The board wasn't changed"
-            alert.informativeText = Pairing.sentence(error)
-            alert.runModal()
+        do { _ = try apply(command, remember: true) } catch { show("The board wasn't changed", Pairing.sentence(error)) }
+    }
+
+    private func show(_ title: String, _ info: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = info
+        alert.runModal()
+    }
+
+    /// The owner's verdict on a card, from the buttons or the keys; Changes and Hold ask for the note first.
+    func review(_ verdict: Verdict, board: String, card: String) {
+        var note = ""
+        if verdict.needsNote {
+            let ask = verdict == .hold ? ("Hold \(card)", "Say why. It becomes the card's blocker.")
+                : ("Changes to \(card)", "Say what to fix. The agent reads it when it picks the card up.")
+            guard let text = self.ask(ask.0, ask.1, button: verdict == .hold ? "Hold" : "Send back") else { return }
+            note = text
         }
+        perform(.review(board: board, card: card, verdict: verdict, note: note))
+    }
+
+    /// ⌘Z: takes the last verdict given here back, but only while nothing else has changed the board since.
+    func undoReview() {
+        guard let last = lastReview else { return }
+        lastReview = nil
+        do {
+            guard try String(contentsOf: last.url, encoding: .utf8) == last.after else {
+                return show("The verdict was left as it is", "The board has changed since, so putting the old text back would undo someone else's edit.")
+            }
+            try last.before.write(to: last.url, atomically: true, encoding: .utf8)
+            if let fresh = Scanner.board(at: last.url) {
+                publish(boards.map { $0.path == last.url.path ? Board(path: $0.path, name: $0.name, cards: fresh.cards) : $0 })
+            }
+        } catch { show("The verdict wasn't taken back", Pairing.sentence(error)) }
     }
 
     /// Asks for one line of text: nil when cancelled.

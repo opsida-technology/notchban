@@ -28,6 +28,8 @@ struct CardRef: Hashable { let board: String, card: String }
     struct NewCard: Identifiable { let board: String?; var id: String { board ?? "" } }
     @Published var tab = Tab.needs
     @Published var newCard: NewCard?
+    /// The Boards tab's stack: a board, then its cards. One path for both, so pushing a card keeps the board under it.
+    @Published var boards = NavigationPath()
 }
 
 /// The two tabs, each with its own navigation, under the design's tab bar (drawn by each screen that shows it).
@@ -39,7 +41,7 @@ struct RootView: View {
             NavigationStack { HomeView().destinations() }
                 .tag(Nav.Tab.needs)
                 .toolbar(.hidden, for: .tabBar)
-            NavigationStack { BoardsView().destinations() }
+            NavigationStack(path: $nav.boards) { BoardsView().destinations() }
                 .tag(Nav.Tab.boards)
                 .toolbar(.hidden, for: .tabBar)
         }
@@ -193,6 +195,8 @@ struct DesignScroll<Top: View, Content: View>: View {
 /// "Ada's MacBook Pro · live", or how far the Mac is.
 struct LivePill: View {
     @EnvironmentObject var link: Link
+    /// Shown as a button (a chevron): tapping it opens what the pill is a handle for.
+    var opens = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -206,6 +210,7 @@ struct LivePill: View {
                 }
             }
             .lineLimit(1)
+            if opens { Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.onNotch2.opacity(0.7)) }
         }
         .font(Theme.metaBold)
         .foregroundStyle(Theme.onNotch2)
@@ -694,13 +699,13 @@ struct LitSwitcher<Value: Hashable>: View {
                         }
                         Text(option.title).lineLimit(1).fixedSize()
                         if let count = option.count {
-                            Text("\(count)").font(Theme.font(12, .bold).monospacedDigit())
+                            Text("\(count)").font(Theme.font(12, .bold).monospacedDigit()).lineLimit(1).fixedSize()
                                 .foregroundStyle(option.accent ?? (on ? Theme.onNotch : Theme.onNotch2))
                         }
                     }
                     .font(Theme.font(13.5, .semibold))
                     .foregroundStyle(on ? Theme.onNotch : Theme.onNotch2.opacity(0.8))
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, fill ? 8 : 14)  // four shared segments: room for "Later 116"
                     .frame(maxWidth: fill ? .infinity : nil, minHeight: 44)
                     .background {
                         if on {

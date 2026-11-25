@@ -1,36 +1,32 @@
-import MultipeerConnectivity
+import AVFoundation
+import NotchbanCore
 import SwiftUI
+import VisionKit
 
-/// First run: find the Mac nearby and type the code it shows.
+/// First run: scan the QR code the Mac shows. It carries the pairing token from the Mac's screen to the camera, so the
+/// token never goes over the air.
 struct PairView: View {
     @EnvironmentObject var link: Link
-    @State private var code = ""
-    @State private var chosen: MCPeerID?
-    @FocusState private var typing: Bool
-
-    /// The Mac to pair with: the one tapped, or the only one nearby.
-    private var target: MCPeerID? {
-        if let chosen, link.nearby.contains(chosen) { return chosen }
-        return link.nearby.count == 1 ? link.nearby[0] : nil
-    }
+    @State private var scanning = false
+    @State private var problem: String?
 
     var body: some View {
         DesignScroll(spacing: 18) {
             island
         } content: {
             VStack(alignment: .leading, spacing: 14) {
-                FieldLabel(text: "Type the code your Mac shows")
-                codeBoxes
-                Text(link.pairingError ?? "On the Mac: board menu › Pair iPhone… The code works once, for two minutes.")
-                    .font(Theme.font(13)).foregroundStyle(link.pairingError == nil ? Theme.onNotch2 : Theme.late.text)
-                Button(action: pair) {
+                FieldLabel(text: "Scan the code your Mac shows")
+                Text(problem ?? link.pairingError ?? "On the Mac: board menu › Pair iPhone… The code works once, for two minutes.")
+                    .font(Theme.font(13))
+                    .foregroundStyle(problem == nil && link.pairingError == nil ? Theme.onNotch2 : Theme.late.text)
+                Button(action: scan) {
                     HStack(spacing: 8) {
-                        if link.state == .connecting { ProgressView().tint(Theme.notch) }
-                        Text(link.state == .connecting ? "Pairing…" : "Pair")
+                        if link.state == .connecting { ProgressView().tint(Theme.notch) } else { Image(systemName: "qrcode.viewfinder") }
+                        Text(link.state == .connecting ? "Pairing…" : "Scan the Code")
                     }
                 }
                 .buttonStyle(WhiteCapsuleStyle())
-                .disabled(!ready)
+                .disabled(link.state == .connecting)
                 .padding(.top, 2)
             }
             .padding(18)
@@ -39,6 +35,19 @@ struct PairView: View {
                 fact("wifi", "Wi-Fi or Bluetooth, straight to your Mac")
                 fact("lock", "Encrypted. No account, no server.")
                 fact("doc.text", "Your boards stay KANBAN.md files on the Mac")
+            }
+        }
+        .sheet(isPresented: $scanning) {
+            QRScanner { offer in
+                scanning = false
+                link.pair(offer)
+            }
+            .ignoresSafeArea()
+            .overlay(alignment: .top) {
+                Text("Point at the code on your Mac").font(Theme.font(15, .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(Capsule().fill(.black.opacity(0.6)))
+                    .padding(.top, 24)
             }
         }
     }
@@ -62,61 +71,12 @@ struct PairView: View {
             .clipped()
             .padding(.horizontal, -20) // out to the island's edges
             .accessibilityHidden(true)
-            if link.nearby.count > 1 {
-                Text("Which Mac?").font(Theme.font(26, .bold)).frame(maxWidth: .infinity)
-                FlowLayout(spacing: 8) {
-                    ForEach(link.nearby, id: \.self) { peer in
-                        let on = target == peer
-                        Button { chosen = peer } label: {
-                            Text(peer.displayName).font(Theme.font(14, .semibold))
-                                .foregroundStyle(on ? Color.black : Theme.onNotch)
-                                .padding(.horizontal, 16).frame(height: 44)
-                                .background(Capsule().fill(on ? Theme.onNotch : Theme.notchWell)
-                                    .overlay(Capsule().strokeBorder(on ? .clear : Theme.notchLine)))
-                        }
-                        .accessibilityAddTraits(on ? .isSelected : [])
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            } else {
-                Text(target?.displayName ?? "Looking for your Mac…").font(Theme.font(26, .bold)).kerning(-0.6)
-                    .multilineTextAlignment(.center).frame(maxWidth: .infinity)
-                Text(target == nil ? "Open notchban on the Mac, on the same Wi-Fi" : "Found on this Wi-Fi")
-                    .font(Theme.font(13)).foregroundStyle(Theme.onNotch2).frame(maxWidth: .infinity)
-            }
+            Text(link.nearby.count == 1 ? link.nearby[0].displayName : link.nearby.isEmpty ? "Looking for your Mac…" : "\(link.nearby.count) Macs nearby")
+                .font(Theme.font(26, .bold)).kerning(-0.6)
+                .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            Text(link.nearby.isEmpty ? "Open notchban on the Mac, on the same Wi-Fi" : "Found on this Wi-Fi")
+                .font(Theme.font(13)).foregroundStyle(Theme.onNotch2).frame(maxWidth: .infinity)
         }
-    }
-
-    /// Six boxes over one hidden text field, so the code can be typed or pasted from the keyboard's suggestion.
-    private var codeBoxes: some View {
-        let digits = Array(code)
-        return ZStack {
-            TextField("", text: $code)
-                .keyboardType(.numberPad)
-                .textContentType(.oneTimeCode)
-                .focused($typing)
-                .foregroundStyle(.clear).tint(.clear)
-                .accessibilityLabel("Pairing code")
-                .onChange(of: code) { _, new in
-                    let only = String(new.filter(\.isNumber).prefix(6))
-                    if only != new { code = only } else if only.count == 6 { pair() }
-                }
-            HStack(spacing: 8) {
-                ForEach(0..<6, id: \.self) { i in
-                    Text(i < digits.count ? String(digits[i]) : "")
-                        .font(Theme.code).foregroundStyle(Theme.onNotch)
-                        .frame(maxWidth: .infinity, minHeight: 60)
-                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Theme.notchWell))
-                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(typing && i == min(digits.count, 5) ? Theme.sky.fill : Theme.notchLine,
-                                          lineWidth: typing && i == min(digits.count, 5) ? 2 : 1))
-                }
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { typing = true }
     }
 
     private func fact(_ icon: String, _ text: String) -> some View {
@@ -129,10 +89,51 @@ struct PairView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var ready: Bool { code.count == 6 && target != nil && link.state != .connecting }
+    private func scan() {
+        problem = nil
+        guard DataScannerViewController.isSupported else {
+            problem = "This iPhone can't scan codes with its camera."
+            return
+        }
+        Task {
+            if await AVCaptureDevice.requestAccess(for: .video) {
+                scanning = true
+            } else {
+                problem = "Notchban needs the camera to read the code. Allow it in Settings › Notchban."
+            }
+        }
+    }
+}
 
-    private func pair() {
-        guard ready, let target else { return }
-        link.pair(with: target, code: code)
+/// The camera, reading QR codes until one is a notchban pairing code.
+struct QRScanner: UIViewControllerRepresentable {
+    var found: (PairingOffer) -> Void
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], isHighlightingEnabled: true)
+        scanner.delegate = context.coordinator
+        return scanner
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {
+        if !scanner.isScanning { try? scanner.startScanning() }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(found) }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        private let found: (PairingOffer) -> Void
+        private var done = false
+
+        init(_ found: @escaping (PairingOffer) -> Void) { self.found = found }
+
+        func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
+            for case let .barcode(code) in items {
+                guard !done, let text = code.payloadStringValue, let offer = PairingOffer(link: text) else { continue }
+                done = true
+                scanner.stopScanning()
+                found(offer)
+            }
+        }
     }
 }
