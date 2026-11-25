@@ -10,6 +10,8 @@ struct HomeView: View {
     @State private var searching = false
     @State private var query = ""
     @State private var due = Due.all
+    /// The board the deck is narrowed to (its path); nil shows every project.
+    @State private var project: String?
     /// Cards sent off the deck, hidden until the Mac's next snapshot no longer shows them in review.
     @State private var gone: Set<String> = []
     @State private var noteFor: Pending?
@@ -66,6 +68,7 @@ struct HomeView: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         return waiting.filter { item in
             !hidden(item)
+                && (project == nil || item.board.path == project)
                 && (due == .all || bucket(item.card) == due)
                 && (q.isEmpty || "\(item.card.title) \(item.card.id) \(item.board.displayName)".localizedCaseInsensitiveContains(q))
         }
@@ -73,6 +76,7 @@ struct HomeView: View {
 
     var body: some View {
         let left = waiting.filter { !hidden($0) }
+        let scoped = project == nil ? left : left.filter { $0.board.path == project }
         DesignScroll(spacing: 14) {
             island(left)
         } content: {
@@ -83,12 +87,13 @@ struct HomeView: View {
                 CalmIsland(systemImage: "checkmark", title: "Nothing waits for you",
                            line: "When an agent needs your verdict, its card lands here.")
             } else {
-                filters(left)
+                projects(left)
+                filters(scoped)
                 if deck.isEmpty {
                     CalmIsland(systemImage: query.isEmpty ? "checkmark" : "magnifyingglass",
                                title: query.isEmpty ? "Nothing \(due == .late ? "late" : due == .today ? "due today" : "for later")"
                                    : "No card matches “\(query)”",
-                               line: query.isEmpty ? "\(left.count) other\(left.count == 1 ? "" : "s") wait\(left.count == 1 ? "s" : "") under All." : "Try another word.")
+                               line: query.isEmpty ? "\(scoped.count) other\(scoped.count == 1 ? "" : "s") wait\(scoped.count == 1 ? "s" : "") under All." : "Try another word.")
                 } else {
                     Deck(items: deck, connected: link.isConnected, queued: link.queued.count, verdict: verdict)
                     if !hintSeen {
@@ -121,6 +126,7 @@ struct HomeView: View {
             NoteSheet(ref: ref(pending.item), verdict: pending.verdict) { send(pending.item, pending.verdict, sent: true) }
                 .presentationDetents([.medium, .large])
         }
+        .onChange(of: scoped.isEmpty && !left.isEmpty) { _, empty in if empty { project = nil } }
         .onChange(of: link.snapshot?.at) {
             // a card that left review is no longer hidden: if it ever comes back, it shows
             let still = Set(waiting.map(key))
@@ -339,6 +345,20 @@ struct HomeView: View {
     }
 
     // MARK: filters
+
+    /// A dial of the projects with cards waiting, by the name the board shows (a rename counts), A to Z; hidden when
+    /// only one has any. Turn it with a drag, or tap a name.
+    @ViewBuilder
+    private func projects(_ left: [Item]) -> some View {
+        let names = Dictionary(grouping: left, by: { $0.board.path })
+        let order = boards.filter { names[$0.path] != nil }
+        if order.count > 1 {
+            ProjectDial(
+                options: [.init(path: nil, title: "All projects", count: left.count)]
+                    + order.map { .init(path: $0.path, title: $0.displayName, count: names[$0.path]?.count ?? 0) },
+                selection: $project)
+        }
+    }
 
     private func filters(_ left: [Item]) -> some View {
         let late = left.filter { bucket($0.card) == .late }.count
@@ -753,5 +773,105 @@ private struct AlsoNeeds: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - project dial
+
+/// A round dial: the names sit on a big circle whose top shows, the chosen one at the peak. A drag turns it and it
+/// settles on the nearest name; a tap on a neighbour turns it there.
+private struct ProjectDial: View {
+    struct Option: Identifiable {
+        let path: String?
+        let title: String
+        let count: Int
+        var id: String { path ?? "" }
+    }
+
+    let options: [Option]
+    @Binding var selection: String?
+
+    /// Where the dial is, in names (1.5 = halfway between the second and third); follows the finger.
+    @State private var turn: Double = 0
+    @State private var dragStart: Double?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let radius: CGFloat = 230
+    private let step: Double = 0.62 // radians between two names
+    private let pixelsPerName: CGFloat = 110
+
+    private var index: Int { options.firstIndex { $0.path == selection } ?? 0 }
+
+    private var ring: some View {
+        let size = radius * 2 + 120
+        return Circle().strokeBorder(Theme.fg.opacity(0.10), lineWidth: 1.5)
+            .frame(width: size, height: size)
+            .offset(y: radius + 14)
+    }
+
+    private func name(_ i: Int, _ option: Option) -> some View {
+        let d = Double(i) - turn
+        let angle = d * step
+        let near = abs(d) < 0.5
+        return Button { settle(i) } label: {
+            Text(option.title)
+                .font(Theme.font(near ? 20 : 14, .semibold)).lineLimit(1)
+                .foregroundStyle(near ? Theme.fg : Theme.fg2)
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .rotationEffect(.radians(angle))
+        .offset(x: radius * CGFloat(sin(angle)), y: 18 + radius * CGFloat(1 - cos(angle)))
+        .opacity(max(0, 1 - abs(d) * 0.55))
+        .accessibilityHidden(true)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            ForEach(Array(options.enumerated()), id: \.element.id) { i, option in
+                if abs(Double(i) - turn) < 1.7 { name(i, option) }
+            }
+            // the count of the chosen one, small, under its name
+            Text("\(options[index].count) waiting")
+                .font(Theme.font(12, .medium)).foregroundStyle(Theme.fg3)
+                .offset(y: 52)
+            // the peak mark the names stop under
+            Capsule().fill(Theme.indigo.fill).frame(width: 26, height: 4).offset(y: 6)
+        }
+        .frame(maxWidth: .infinity).frame(height: 92, alignment: .top)
+        .background(alignment: .top) { ring }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(Theme.fg.opacity(0.05), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { g in
+                    let start = dragStart ?? turn
+                    dragStart = start
+                    turn = min(max(start - Double(g.translation.width / pixelsPerName), 0), Double(options.count - 1))
+                }
+                .onEnded { g in
+                    let end = (dragStart ?? turn) - Double((g.translation.width + g.velocity.width * 0.12) / pixelsPerName)
+                    dragStart = nil
+                    settle(Int(min(max(end.rounded(), 0), Double(options.count - 1))))
+                })
+        .onAppear { turn = Double(index) }
+        .onChange(of: selection) { if dragStart == nil { turn = Double(index) } }
+        .sensoryFeedback(.selection, trigger: index)
+        .accessibilityElement()
+        .accessibilityLabel("Project")
+        .accessibilityValue("\(options[index].title), \(options[index].count) waiting")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: settle(min(index + 1, options.count - 1))
+            case .decrement: settle(max(index - 1, 0))
+            @unknown default: break
+            }
+        }
+    }
+
+    private func settle(_ i: Int) {
+        selection = options[i].path
+        if reduceMotion { turn = Double(i) } else { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { turn = Double(i) } }
     }
 }

@@ -38,6 +38,8 @@ struct Queued: Codable, Identifiable, Equatable {
     var card: String
     var verdict: Verdict
     var note: String
+    /// The card's `reviews` when the owner decided; the Mac refuses the verdict if the card has had another since.
+    var seen: Int?
 }
 
 /// The phone's side of the link: finds the paired Mac nearby (MultipeerConnectivity, encryption required), keeps the
@@ -182,11 +184,12 @@ final class Link: NSObject, ObservableObject {
 
     /// A verdict: sent now when the Mac is near, else kept on the phone and sent when it is back.
     func review(board: String, card: String, verdict: Verdict, note: String) async -> Outcome {
+        let seen = self.board(board)?.card(card)?.reviews
         if isConnected {
-            let outcome = await run(.review(board: board, card: card, verdict: verdict, note: note))
+            let outcome = await run(.review(board: board, card: card, verdict: verdict, note: note, seen: seen))
             if !outcome.retry { return outcome }
         }
-        queued.append(Queued(board: board, card: card, verdict: verdict, note: note))
+        queued.append(Queued(board: board, card: card, verdict: verdict, note: note, seen: seen))
         saveQueue()
         return Outcome(queued: true)
     }
@@ -200,7 +203,7 @@ final class Link: NSObject, ObservableObject {
         Task {
             var refused: [String] = []
             while let next = queued.first, isConnected {
-                let outcome = await run(.review(board: next.board, card: next.card, verdict: next.verdict, note: next.note))
+                let outcome = await run(.review(board: next.board, card: next.card, verdict: next.verdict, note: next.note, seen: next.seen))
                 if outcome.retry { break }
                 queued.removeAll { $0.id == next.id }
                 saveQueue()

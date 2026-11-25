@@ -51,6 +51,13 @@ final class EditTests: XCTestCase {
         XCTAssertTrue(text.contains("## Backlog\n\n### AB-10 — Fix the login\n<!-- squawk:{\"source\":\"human\",\"created\":\"2026-11-24\"} -->\n\nSeen on iPad.\n\n### AB-08"))
     }
 
+    func testAVerdictSeenOnAnOlderRoundIsRefused() throws {
+        XCTAssertNoThrow(try run(.review(board: "", card: "AB-09", verdict: .done, note: "", seen: 0)))
+        XCTAssertThrowsError(try run(.review(board: "", card: "AB-09", verdict: .done, note: "", seen: 1))) {
+            XCTAssertEqual($0 as? BoardEditor.Failure, .notInReview("AB-09"))
+        }
+    }
+
     func testReviewVerdictsMoveTheCardAndSignIt() throws {
         let (changes, text) = try run(.review(board: "/r/KANBAN.md", card: "AB-09", verdict: .changes, note: "use the new icon"))
         let card = try XCTUnwrap(changes.card("AB-09"))

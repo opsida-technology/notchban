@@ -19,7 +19,9 @@ public enum Verdict: String, Codable, CaseIterable, Sendable {
 public enum BoardCommand: Codable, Equatable, Sendable {
     /// A card the owner typed in: `"source": "human"`, on top of its column.
     case add(board: String, title: String, notes: String, column: Column)
-    case review(board: String, card: String, verdict: Verdict, note: String)
+    /// `seen` is the card's `reviews` when the owner decided; the Mac refuses the verdict if the card has had another
+    /// review since, so a verdict sent late never lands on a card that came back for a new look.
+    case review(board: String, card: String, verdict: Verdict, note: String, seen: Int? = nil)
     case note(board: String, card: String, text: String)
     /// The owner's review day for a card; nil clears it.
     case due(board: String, card: String, day: String?)
@@ -28,7 +30,7 @@ public enum BoardCommand: Codable, Equatable, Sendable {
 
     public var board: String {
         switch self {
-        case .add(let b, _, _, _), .review(let b, _, _, _), .note(let b, _, _), .due(let b, _, _), .rename(let b, _): b
+        case .add(let b, _, _, _), .review(let b, _, _, _, _), .note(let b, _, _), .due(let b, _, _), .rename(let b, _): b
         }
     }
 }
@@ -58,11 +60,12 @@ public enum BoardEditor {
             try insert(block, at: column, in: &lines)
             return (lines.joined(separator: "\n"), id)
 
-        case let .review(_, id, verdict, note):
+        case let .review(_, id, verdict, note, seen):
             let note = oneLine(note)
             if verdict.needsNote && note.isEmpty { throw Failure.emptyText }
             guard let at = column(of: id, in: text) else { throw Failure.noCard(id) }
             guard at == .review else { throw Failure.notInReview(id) }
+            if let seen, let now = BoardParser.parse(text, path: "")?.card(id)?.reviews, now != seen { throw Failure.notInReview(id) }
             var block = try take(id, from: &lines)
             setMeta(&block, [("due", nil), ("owner", nil), ("task", nil), ("lease", nil)])
             append(&block, "Review (\(person), \(today)): \(verdict.rawValue)" + (note.isEmpty ? "" : " — \(note)"))

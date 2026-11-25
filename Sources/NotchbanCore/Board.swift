@@ -40,6 +40,9 @@ public struct Card: Identifiable, Equatable, Codable, Sendable {
     public var notes: String = ""
 
     public var isHumanEntered: Bool { source == "human" }
+    /// How many verdicts the owner has already written into the notes.
+    public var reviews: Int { notes.split(separator: "\n").filter { $0.hasPrefix("Review (") }.count }
+
     /// What the owner must do, from the last `Needs:` line an agent wrote into the notes.
     public var needs: String? {
         notes.split(separator: "\n").last { $0.hasPrefix("Needs:") }.map { $0.dropFirst(6).trimmingCharacters(in: .whitespaces) }
