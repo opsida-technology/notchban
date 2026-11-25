@@ -16,8 +16,7 @@ sessions, their subagents, their 5-hour and weekly limits. It writes a board onl
 A pill over the notch with an ear on each side: Codex on the left, Claude on the right. Each ear shows the
 5-hour and weekly limits as two rings, the 5-hour figure with when it resets, and how many agents work now.
 Put the pointer on the pill (or click it, or ⌥⌘B) and the whole board hangs from the notch; Esc, a click
-elsewhere or the pointer leaving closes it. Figures more than half an hour old are dimmed. A tab under the pill counts the cards waiting for your review and
-the stale leases. The board switcher's menu can also send a notification when a card newly needs you.
+elsewhere or the pointer leaving closes it. Figures more than half an hour old are dimmed. The board switcher's menu can also send a notification when a card newly needs you.
 
 ## The board
 
