@@ -578,10 +578,15 @@ struct Lanes: View {
             let total = CGFloat(max(board.cards.count, 1))
             let gap: CGFloat = height >= 10 ? 4 : 2
             let usable = geo.size.width - CGFloat(max(columns.count - 1, 0)) * gap
+            // Tiny columns keep a dot's width; the big ones give up exactly that much, so the bar never passes its edge.
+            let share = { (column: Column) in usable * CGFloat(board.count(column)) / total }
+            let tiny = columns.filter { share($0) < height }.count
+            let bigSum = columns.map(share).filter { $0 >= height }.reduce(0, +)
+            let squeeze = bigSum > 0 ? min(1, (usable - CGFloat(tiny) * height) / bigSum) : 1
             HStack(spacing: gap) {
                 ForEach(columns, id: \.self) { column in
                     Capsule().fill(Theme.column(column).fill)
-                        .frame(width: max(height, usable * CGFloat(board.count(column)) / total))
+                        .frame(width: share(column) < height ? height : share(column) * squeeze)
                 }
             }
         }
