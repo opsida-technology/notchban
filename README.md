@@ -109,12 +109,15 @@ Mac, which writes them into the `KANBAN.md` like any other edit of yours.
 - **The link**: Wi-Fi or Bluetooth, straight between the two (MultipeerConnectivity). No account, no server, no
   cloud. Each session agrees new keys, both sides prove the paired secret over them, and every message after that
   is sealed (ChaChaPoly), so nobody nearby can read, change or replay it.
+- **Away from home, over Tailscale** (optional): with Tailscale on both, turn on board menu › Reach the iPhone over
+  Tailscale. The Mac then listens on its Tailscale address only (TCP 47621) and takes paired phones only, with the
+  same proofs and seal; the phone uses it whenever the Mac is not nearby. Pairing still needs the QR code.
 - **Verdicts**: swipe the card (right approves, left asks for changes, up is done, down holds). A verdict waits
   five seconds with an Undo bar before it is sent.
 - **Projects and boards**: on the home screen a project dial (a ticked arc you turn) filters the cards that need you. Turn the phone sideways on a board and it lies down as one kanban row, empty columns folded to rails; tap a card for its sheet with the verdict buttons.
 - **Away from the Mac**: the phone shows the last boards it received. Verdicts you give are kept on the phone and
   sent, in order, when the Mac is back; a card you already decided on the Mac is skipped and named. Other changes
-  need the Mac nearby and awake.
+  need the Mac in reach (nearby, or over Tailscale) and awake.
 
 The app is not in the App Store yet; its source is in [iOS/](iOS), built with [XcodeGen](https://github.com/yonaskolb/XcodeGen).
 
