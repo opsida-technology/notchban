@@ -19,7 +19,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.opsidatech.notchban.ios
         PRODUCT_NAME: Notchban
-        MARKETING_VERSION: 0.1.0
+        MARKETING_VERSION: 0.2.7
         CURRENT_PROJECT_VERSION: 1
         DEVELOPMENT_TEAM: KT2Z279LC8
         CODE_SIGN_STYLE: Automatic

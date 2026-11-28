@@ -266,7 +266,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.7;
 				OTHER_SWIFT_FLAGS = "-enable-bare-slash-regex";
 				PRODUCT_BUNDLE_IDENTIFIER = com.opsidatech.notchban.ios;
 				PRODUCT_NAME = Notchban;
@@ -289,7 +289,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.7;
 				OTHER_SWIFT_FLAGS = "-enable-bare-slash-regex";
 				PRODUCT_BUNDLE_IDENTIFIER = com.opsidatech.notchban.ios;
 				PRODUCT_NAME = Notchban;
