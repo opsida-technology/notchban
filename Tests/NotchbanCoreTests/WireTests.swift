@@ -32,7 +32,7 @@ final class WireTests: XCTestCase {
         for message in messages {
             XCTAssertEqual(try WireMessage.decode(message.encoded()), message)
         }
-        guard case let .snapshot(boards, _, ears) = try WireMessage.decode(messages[0].encoded()) else { return XCTFail() }
+        guard case let .snapshot(boards, _, ears, _) = try WireMessage.decode(messages[0].encoded()) else { return XCTFail() }
         XCTAssertNil(ears)
         XCTAssertEqual(boards[0].displayName, "Shop")
         XCTAssertTrue(boards[0].cards[0].isHumanEntered)
@@ -42,7 +42,7 @@ final class WireTests: XCTestCase {
         // what a Mac from before the ears sends
         let json = #"{"snapshot":{"boards":[],"at":0}}"#
         let data = try (Data(json.utf8) as NSData).compressed(using: .lzfse) as Data
-        guard case let .snapshot(boards, _, ears) = try WireMessage.decode(data) else { return XCTFail() }
+        guard case let .snapshot(boards, _, ears, _) = try WireMessage.decode(data) else { return XCTFail() }
         XCTAssertEqual(boards, [])
         XCTAssertNil(ears)
     }
@@ -130,5 +130,24 @@ final class WireTests: XCTestCase {
         XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)&token=AAAA"), "a short token")
         XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)"))
         XCTAssertNil(PairingOffer(link: "123456"))
+    }
+
+    func testFramesSurviveAnySplitAndRefuseOversizedMessages() throws {
+        let a = Data("first".utf8), b = Data(repeating: 7, count: 300)
+        let stream = Frames.wrap(a) + Frames.wrap(b) + Frames.wrap(Data())
+        var frames = Frames(limit: 1_000), out: [Data] = []
+        for chunk in stride(from: 0, to: stream.count, by: 3) { out += try frames.feed(stream.subdata(in: chunk..<min(chunk + 3, stream.count))) }
+        XCTAssertEqual(out, [a, b, Data()])
+        var small = Frames(limit: 100)
+        XCTAssertThrowsError(try small.feed(Frames.wrap(b).prefix(4)))
+    }
+
+    func testASnapshotCarriesTheMacsTailscaleAddressAndOldOnesStillOpen() throws {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        guard case let .snapshot(_, _, _, remote) = try WireMessage.decode(WireMessage.snapshot(boards: [], at: now, remote: "100.1.2.3").encoded())
+        else { return XCTFail() }
+        XCTAssertEqual(remote, "100.1.2.3")
+        guard case let .snapshot(_, _, _, none) = try WireMessage.decode(WireMessage.snapshot(boards: [], at: now).encoded()) else { return XCTFail() }
+        XCTAssertNil(none)
     }
 }

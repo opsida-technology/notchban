@@ -42,6 +42,8 @@ struct ProjectDial: View {
             .gesture(drag(max: options.count - 1))
         }
         .background(Color.black.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)  // black in both modes, like the notch: its text must be light in both
+        .preferredColorScheme(.dark)
         .onAppear { pos = Double(index) }
         .sensoryFeedback(.selection, trigger: index)
         .accessibilityElement(children: .contain)

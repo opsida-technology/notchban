@@ -50,6 +50,8 @@ struct Toolbar: View {
             Button("Rename \(board.displayName)…") { model.rename(board) }
             Button("Boards Folder: \((model.root.path as NSString).abbreviatingWithTildeInPath)…") { model.chooseRoot() }
             Button("Pair iPhone…") { (NSApp.delegate as? Delegate)?.pairing.showWindow() }
+            Toggle("Reach the iPhone over Tailscale", isOn: Binding(get: { (NSApp.delegate as? Delegate)?.pairing.remote ?? false },
+                                                                  set: { (NSApp.delegate as? Delegate)?.pairing.setRemote($0) }))
             Toggle("Claude Limits from Anthropic", isOn: Binding(get: { model.claudeEndpoint }, set: { model.setClaudeEndpoint($0) }))
             if Notifier.available { Toggle("Notify When a Card Needs Me", isOn: $model.notifyReview) }
             Divider()

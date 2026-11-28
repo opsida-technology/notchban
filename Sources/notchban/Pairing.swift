@@ -3,6 +3,7 @@ import Combine
 import CoreImage.CIFilterBuiltins
 import CryptoKit
 import MultipeerConnectivity
+import Network
 import NotchbanCore
 import Security
 import SwiftUI
@@ -10,7 +11,8 @@ import SwiftUI
 /// The Mac's side of the iPhone link: MultipeerConnectivity (Wi-Fi, peer-to-peer Wi-Fi, Bluetooth; no server), encryption
 /// required. A phone pairs once by scanning a QR code shown here, which hands it a token without sending it over the air;
 /// from then on the Mac accepts only invitations that prove a paired phone's token. Each phone gets the boards on connect and after every change, and its commands go through
-/// `Model.apply`, so the `KANBAN.md` files stay the only truth.
+/// `Model.apply`, so the `KANBAN.md` files stay the only truth. Away from home a paired phone can come in over Tailscale
+/// instead, when the owner turned that on: a TCP port on the Mac's Tailscale address only, the same proofs and seal.
 @MainActor
 final class Pairing: NSObject, ObservableObject {
     /// The QR code the open pairing window shows; nil when no phone may pair.
@@ -22,9 +24,32 @@ final class Pairing: NSObject, ObservableObject {
     }
     /// Device ids with a live link.
     @Published private(set) var connected: Set<String> = []
+    /// Paired phones may also come in over Tailscale (off until the owner turns it on).
+    @Published private(set) var remote = UserDefaults.standard.bool(forKey: "tailscale")
+
+    /// How a phone's messages travel: MultipeerConnectivity nearby, or a TCP connection over Tailscale.
+    private enum Pipe {
+        case near(MCSession, MCPeerID)
+        case far(NWConnection)
+
+        func send(_ data: Data) throws {
+            switch self {
+            case let .near(session, peer): try session.send(data, toPeers: [peer], with: .reliable)
+            case let .far(connection): connection.send(content: Frames.wrap(data), completion: .contentProcessed { _ in })
+            }
+        }
+
+        func close() {
+            switch self {
+            case let .near(session, _): session.disconnect()
+            case let .far(connection): connection.cancel()
+            }
+        }
+    }
 
     private struct Link {
-        let session: MCSession
+        let pipe: Pipe
+        var session: MCSession? { if case let .near(session, _) = pipe { session } else { nil } }
         let device: String
         let name: String
         /// Came in with the QR code's token: the phone is kept once it proves the token in this session.
@@ -47,7 +72,13 @@ final class Pairing: NSObject, ObservableObject {
         return id
     }()
     private var advertiser: MCNearbyServiceAdvertiser?
-    private var links: [MCPeerID: Link] = [:]
+    /// Keyed by the MCPeerID nearby, by the connection's ObjectIdentifier over Tailscale.
+    private var links: [AnyHashable: Link] = [:]
+    private var listener: NWListener?
+    /// The Tailscale address the listener is bound to, once it is up; sent to phones in each snapshot.
+    private var address: String?
+    private var frames: [ObjectIdentifier: Frames] = [:]
+    private var recheck: Timer?
     /// Tokens read from the Keychain, read when a phone first knocks.
     private var tokens: [String: Data] = [:]
     /// Proofs already used, so an overheard invitation cannot be replayed.
@@ -63,6 +94,14 @@ final class Pairing: NSObject, ObservableObject {
 
     func start() {
         advertise()
+        listen()
+        // Tailscale may come up, go down or change address while the app runs
+        recheck = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.remote, Self.tailscaleAddress() != self.address else { return }
+                self.listen()
+            }
+        }
         // a board changed, or what the ears show did (not every read of the sessions, which changes their notes)
         let ears = model.$providers.map { $0.map(Self.ear) }.removeDuplicates().map { _ in () }
         watch = model.$boards.map { _ in () }.merge(with: ears).dropFirst(2)
@@ -115,9 +154,9 @@ final class Pairing: NSObject, ObservableObject {
         PhoneKeychain.delete(device)
         tokens[device] = nil
         phones[device] = nil
-        for (peer, link) in links where link.device == device {
-            link.session.disconnect()
-            links[peer] = nil
+        for (key, link) in links where link.device == device {
+            link.pipe.close()
+            links[key] = nil
         }
         connected.remove(device)
     }
@@ -142,31 +181,34 @@ final class Pairing: NSObject, ObservableObject {
     // MARK: invitations
 
     private func invited(_ peer: MCPeerID, _ invitation: Invitation?, _ answer: @escaping (Bool, MCSession?) -> Void) {
+        guard let invitation, let pairing = admit(invitation, pairing: true) else { return answer(false, nil) }
+        links[peer]?.pipe.close()
+        let session = MCSession(peer: me, securityIdentity: nil, encryptionPreference: .required)
+        session.delegate = self
+        links[peer] = Link(pipe: .near(session, peer), device: invitation.device, name: String(invitation.name.prefix(60)),
+                           pairing: pairing.isEmpty ? nil : pairing)
+        answer(true, session)
+    }
+
+    /// Checks a fresh proof, spent once: a paired phone's token (the answer is empty), or, when `pairing` is allowed,
+    /// the open QR code's (the answer is that token, now used up). Nil turns the phone away.
+    private func admit(_ invitation: Invitation, pairing: Bool) -> Data? {
         let now = Date()
         spent = spent.filter { now.timeIntervalSince($0.value) < TimeInterval(Wire.skew * 2) }
-        guard let invitation, let proof = invitation.proof, spent[proof] == nil else { return answer(false, nil) }
+        guard let proof = invitation.proof, spent[proof] == nil else { return nil }
         if phones[invitation.device] != nil {
-            guard let token = token(for: invitation.device), Wire.verify(invitation, token: token, now: now) else { return answer(false, nil) }
+            guard let token = token(for: invitation.device), Wire.verify(invitation, token: token, now: now) else { return nil }
             spent[proof] = now
-            accept(peer, invitation, pairing: nil, answer)
-        } else if let offer, Wire.verify(invitation, token: offer.token, now: now) {
+            return Data()
+        } else if pairing, let offer, Wire.verify(invitation, token: offer.token, now: now) {
             // only a phone that read the QR code can sign with its token
             spent[proof] = now
             self.offer = nil  // good once
             expiry?.cancel()
             status = "Connecting to \(invitation.name)…"
-            accept(peer, invitation, pairing: offer.token, answer)
-        } else {
-            answer(false, nil)
+            return offer.token
         }
-    }
-
-    private func accept(_ peer: MCPeerID, _ invitation: Invitation, pairing: Data?, _ answer: (Bool, MCSession?) -> Void) {
-        links[peer]?.session.disconnect()
-        let session = MCSession(peer: me, securityIdentity: nil, encryptionPreference: .required)
-        session.delegate = self
-        links[peer] = Link(session: session, device: invitation.device, name: String(invitation.name.prefix(60)), pairing: pairing)
-        answer(true, session)
+        return nil
     }
 
     /// The token this link must prove: the QR code's while pairing, else the paired phone's.
@@ -182,43 +224,51 @@ final class Pairing: NSObject, ObservableObject {
     // MARK: session
 
     private func changed(_ peer: MCPeerID, _ state: MCSessionState, in session: MCSession) {
-        guard var link = links[peer], link.session === session else { return }  // not an older, replaced session
+        guard let link = links[peer], link.session === session else { return }  // not an older, replaced session
         switch state {
-        case .connected:
-            // The invitation proof is not tied to this session, so both ends prove the token again inside it, over
-            // one-time keys that become the session's own (see `Channel`).
-            guard let token = secret(link) else { return drop(peer) }
-            let nonce = Wire.newNonce(), own = Curve25519.KeyAgreement.PrivateKey()
-            let key = own.publicKey.rawRepresentation
-            link.nonce = nonce
-            link.ephemeral = own
-            links[peer] = link
-            sendPlain(.challenge(nonce: nonce, key: key, proof: Wire.sessionProof(token: token, role: "mac", device: link.device,
-                                                                                  nonce: nonce, keys: key)),
-                      to: peer, in: link.session)
-            let session = link.session
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-                guard let self, let link = self.links[peer], link.session === session, !link.ready else { return }
-                self.drop(peer)
-            }
-        case .notConnected:
-            links[peer] = nil
-            if !links.values.contains(where: { $0.device == link.device && $0.ready }) { connected.remove(link.device) }
-            if link.pairing != nil && !link.ready { status = "The iPhone didn't connect. Show a new code to try again." }
-        case .connecting:
-            break
-        @unknown default:
-            break
+        case .connected: challenge(peer)
+        case .notConnected: closed(peer)
+        case .connecting: break
+        @unknown default: break
         }
     }
 
+    /// The invitation proof is not tied to this session, so both ends prove the token again inside it, over one-time
+    /// keys that become the session's own (see `Channel`). A link that has not answered in 10 s is dropped.
+    private func challenge(_ key: AnyHashable) {
+        guard var link = links[key] else { return }
+        guard let token = secret(link) else { return drop(key) }
+        let nonce = Wire.newNonce(), own = Curve25519.KeyAgreement.PrivateKey()
+        let mine = own.publicKey.rawRepresentation
+        link.nonce = nonce
+        link.ephemeral = own
+        links[key] = link
+        do {
+            try link.pipe.send(WireMessage.challenge(nonce: nonce, key: mine, proof: Wire.sessionProof(
+                token: token, role: "mac", device: link.device, nonce: nonce, keys: mine)).encoded())
+        } catch {
+            return drop(key)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, let now = self.links[key], now.nonce == nonce, !now.ready else { return }
+            self.drop(key)
+        }
+    }
+
+    /// The link is gone, whichever way it went.
+    private func closed(_ key: AnyHashable) {
+        guard let link = links.removeValue(forKey: key) else { return }
+        if !links.values.contains(where: { $0.device == link.device && $0.ready }) { connected.remove(link.device) }
+        if link.pairing != nil && !link.ready { status = "The iPhone didn't connect. Show a new code to try again." }
+    }
+
     /// The link checks out: it gets snapshots and may send commands, all sealed in `channel`.
-    private func open(_ peer: MCPeerID, _ channel: Channel) {
-        guard var link = links[peer] else { return }
+    private func open(_ key: AnyHashable, _ channel: Channel) {
+        guard var link = links[key] else { return }
         if let token = link.pairing {
             if let failure = PhoneKeychain.save(token, for: link.device) {
                 status = "Couldn't keep the pairing in the Keychain (\(failure)). Show a new code to try again."
-                return drop(peer)
+                return drop(key)
             }
             tokens[link.device] = token
             phones[link.device] = link.name
@@ -227,69 +277,175 @@ final class Pairing: NSObject, ObservableObject {
         link.channel = channel
         link.nonce = nil
         link.ephemeral = nil
-        links[peer] = link
+        links[key] = link
         connected.insert(link.device)
-        send(snapshot, to: peer)
+        send(snapshot, to: key)
     }
 
-    private func drop(_ peer: MCPeerID) {
-        links[peer]?.session.disconnect()
-        links[peer] = nil
+    private func drop(_ key: AnyHashable) {
+        links[key]?.pipe.close()
+        closed(key)
     }
 
     private func received(_ data: Data, from peer: MCPeerID, in session: MCSession) {
-        guard var link = links[peer], link.session === session else { return }
+        guard links[peer]?.session === session else { return }
+        handle(data, from: peer)
+    }
+
+    private func handle(_ data: Data, from key: AnyHashable) {
+        guard var link = links[key] else { return }
         guard var channel = link.channel else {
             guard case let .answer(phoneKey, proof)? = try? WireMessage.decode(data), let nonce = link.nonce,
-                  let own = link.ephemeral, let token = secret(link) else { return drop(peer) }
+                  let own = link.ephemeral, let token = secret(link) else { return drop(key) }
             let macKey = own.publicKey.rawRepresentation
             guard Wire.verify(sessionProof: proof, token: token, role: "phone", device: link.device, nonce: nonce, keys: macKey + phoneKey),
                   let channel = try? Channel(role: "mac", own: own, mac: macKey, phone: phoneKey, token: token,
-                                             device: link.device, nonce: nonce) else { return drop(peer) }
-            return open(peer, channel)
+                                             device: link.device, nonce: nonce) else { return drop(key) }
+            return open(key, channel)
         }
         // anything that does not open as the next sealed message ends the link
-        guard let message = try? channel.open(data) else { return drop(peer) }
+        guard let message = try? channel.open(data) else { return drop(key) }
         link.channel = channel
-        links[peer] = link
+        links[key] = link
         guard case let .command(id, command) = message else { return }
         var added: String?, failure: String?
         do { added = try model.apply(command) } catch { failure = Self.sentence(error) }
-        send(.result(id: id, added: added, error: failure), to: peer)
+        send(.result(id: id, added: added, error: failure), to: key)
     }
 
     private func broadcast() {
         let message = snapshot
-        for peer in links.filter(\.value.ready).keys { send(message, to: peer) }
+        for key in links.filter(\.value.ready).keys { send(message, to: key) }
     }
 
-    private var snapshot: WireMessage { .snapshot(boards: model.boards, at: Date(), ears: model.providers.map(Self.ear)) }
+    private var snapshot: WireMessage {
+        .snapshot(boards: model.boards, at: Date(), ears: model.providers.map(Self.ear), remote: address)
+    }
 
     private static func ear(_ p: Provider) -> NotchbanCore.Ear {
         NotchbanCore.Ear(name: p.name, working: p.active, fiveHour: p.fiveHour?.used, fiveHourResets: p.fiveHour?.resets,
             week: p.week?.used, weekResets: p.week?.resets, recorded: p.recorded)
     }
 
-    /// Sealed in the peer's channel; never sent before the handshake is done.
-    private func send(_ message: WireMessage, to peer: MCPeerID) {
-        guard var link = links[peer], var channel = link.channel else { return }
+    /// Sealed in the link's channel; never sent before the handshake is done.
+    private func send(_ message: WireMessage, to key: AnyHashable) {
+        guard var link = links[key], var channel = link.channel else { return }
         do {
             let data = try channel.seal(message)
             link.channel = channel
-            links[peer] = link
-            try link.session.send(data, toPeers: [peer], with: .reliable)
+            links[key] = link
+            try link.pipe.send(data)
         } catch {
-            NSLog("notchban: sending to %@ failed: %@", peer.displayName, error.localizedDescription)
+            NSLog("notchban: sending to %@ failed: %@", link.name, error.localizedDescription)
         }
     }
 
-    /// The handshake's own messages, the only ones that travel unsealed.
-    private func sendPlain(_ message: WireMessage, to peer: MCPeerID, in session: MCSession) {
-        do {
-            try session.send(message.encoded(), toPeers: [peer], with: .reliable)
-        } catch {
-            NSLog("notchban: sending to %@ failed: %@", peer.displayName, error.localizedDescription)
+    // MARK: over Tailscale
+
+    func setRemote(_ on: Bool) {
+        remote = on
+        UserDefaults.standard.set(on, forKey: "tailscale")
+        listen()
+    }
+
+    /// Listens on the Mac's Tailscale address only, never on the local network or the internet; Tailscale's own
+    /// encryption and access rules come first, then the same proofs and seal as nearby.
+    private func listen() {
+        listener?.cancel()
+        listener = nil
+        if address != nil { address = nil; broadcast() }
+        for (key, link) in links { if case .far = link.pipe { drop(key) } }
+        guard remote, let ip = Self.tailscaleAddress(), let port = NWEndpoint.Port(rawValue: Wire.port) else { return }
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(ip), port: port)
+        parameters.allowLocalEndpointReuse = true
+        guard let l = try? NWListener(using: parameters) else { return }
+        l.stateUpdateHandler = { [weak self, weak l] state in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let l, self.listener === l else { return }
+                    switch state {
+                    case .ready: self.address = ip; self.broadcast()
+                    case .failed: self.listener = nil; self.address = nil  // the minute's recheck tries again
+                    default: break
+                    }
+                }
+            }
         }
+        l.newConnectionHandler = { [weak self] connection in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.arrived(connection) } }
+        }
+        l.start(queue: .main)
+        listener = l
+    }
+
+    /// A knock on the Tailscale port. Its first message must be a paired phone's invitation, small and within 10 s;
+    /// pairing itself needs the QR code on this screen, so it never happens this way.
+    private func arrived(_ connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        frames[id] = Frames(limit: 4_096)
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self?.frames[id] = nil
+                        self?.closed(id)
+                    }
+                }
+            default: break
+            }
+        }
+        connection.start(queue: .main)
+        read(connection)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.links[id] == nil, self.frames[id] != nil else { return }
+            connection.cancel()
+        }
+    }
+
+    private func read(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, done, error in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let id = ObjectIdentifier(connection)
+                    if let data, !data.isEmpty {
+                        guard let messages = try? self.frames[id]?.feed(data) else { return connection.cancel() }
+                        for message in messages { self.framed(message, from: connection) }
+                    }
+                    if done || error != nil { connection.cancel() } else if self.frames[id] != nil { self.read(connection) }
+                }
+            }
+        }
+    }
+
+    private func framed(_ data: Data, from connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        guard links[id] == nil else { return handle(data, from: id) }
+        guard let invitation = try? JSONDecoder().decode(Invitation.self, from: data),
+              admit(invitation, pairing: false) != nil else { return connection.cancel() }
+        links[id] = Link(pipe: .far(connection), device: invitation.device, name: String(invitation.name.prefix(60)), pairing: nil)
+        frames[id]?.limit = 1 << 20  // a proved phone: its commands, never more than a note's length
+        challenge(id)
+    }
+
+    /// This Mac's Tailscale IPv4 address (100.64.0.0/10, on a utun interface), if Tailscale is up.
+    static func tailscaleAddress() -> String? {
+        #if DEBUG
+        // NOTCHBAN_LISTEN=127.0.0.1: a simulator on this Mac cannot reach the Mac's own Tailscale address
+        if let ip = ProcessInfo.processInfo.environment["NOTCHBAN_LISTEN"] { return ip }
+        #endif
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let sa = entry.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: entry.pointee.ifa_name).hasPrefix("utun") else { continue }
+            let bytes = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { withUnsafeBytes(of: $0.pointee.sin_addr) { Array($0) } }
+            if bytes[0] == 100, (64...127).contains(bytes[1]) { return bytes.map(String.init).joined(separator: ".") }
+        }
+        return nil
     }
 
     /// What the owner reads on the phone when a command could not be applied.

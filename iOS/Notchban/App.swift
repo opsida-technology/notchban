@@ -175,6 +175,7 @@ struct Island<Content: View>: View {
 
 /// A screen: the island, then the content, scrolling under the status bar.
 struct DesignScroll<Top: View, Content: View>: View {
+    @EnvironmentObject private var link: Link
     var spacing: CGFloat = 16
     @ViewBuilder let top: Top
     @ViewBuilder let content: Content
@@ -188,7 +189,8 @@ struct DesignScroll<Top: View, Content: View>: View {
             .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
-        .scrollBounceBehavior(.basedOnSize)
+        .scrollBounceBehavior(.always)
+        .refreshable { await link.refresh() }
         .designScreen()
     }
 }

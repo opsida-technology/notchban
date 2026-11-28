@@ -1,14 +1,15 @@
 import CryptoKit
 import Foundation
 
-/// What the Mac and a paired phone say to each other over MultipeerConnectivity (encryption required). One message per
-/// send, JSON compressed with LZFSE. Only `challenge` and `answer` travel as they are; everything after the
+/// What the Mac and a paired phone say to each other, over MultipeerConnectivity (encryption required) or, away from
+/// home, a TCP connection over Tailscale (one message per `Frames` frame). JSON compressed with LZFSE. Only `challenge` and `answer` travel as they are; everything after the
 /// handshake goes through a `Channel`. The Mac's `KANBAN.md` files stay the only truth: the phone holds a snapshot and
 /// sends commands.
 public enum WireMessage: Codable, Equatable, Sendable {
     /// Mac → phone: every board the Mac shows, as of `at`, and what the notch's ears show. On connect and after every
-    /// change.
-    case snapshot(boards: [Board], at: Date, ears: [Ear]? = nil)
+    /// change. `remote` is the Mac's Tailscale address while it takes phones that way, so the phone can reach it away
+    /// from home.
+    case snapshot(boards: [Board], at: Date, ears: [Ear]? = nil, remote: String? = nil)
     /// Mac → phone: how command `id` went; `added` is the id of a card it added, `error` a sentence for the owner.
     case result(id: UUID, added: String?, error: String?)
     /// Phone → Mac.
@@ -70,6 +71,8 @@ public struct Invitation: Codable, Equatable, Sendable {
 public enum Wire {
     /// The Bonjour service type (`_notchban._tcp`, `_notchban._udp`).
     public static let service = "notchban"
+    /// The TCP port the Mac listens on over Tailscale, when the owner turned that on.
+    public static let port: UInt16 = 47_621
     /// How far a paired invitation's clock may be from the Mac's.
     public static let skew = 120
 
@@ -105,6 +108,35 @@ public enum Wire {
     /// A fresh 32-byte pairing token.
     public static func newToken() -> Data {
         SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+    }
+}
+
+/// Whole messages over a byte stream (the Tailscale link): each one is its length, 4 bytes big-endian, then its bytes.
+/// `limit` caps a message, so a peer that has not proved anything cannot make the other end buffer much.
+public struct Frames: Sendable {
+    public struct TooBig: Error {}
+
+    public var limit: Int
+    private var buffer = Data()
+
+    public init(limit: Int) { self.limit = limit }
+
+    public static func wrap(_ message: Data) -> Data {
+        withUnsafeBytes(of: UInt32(message.count).bigEndian) { Data($0) } + message
+    }
+
+    /// Takes bytes as they came off the stream; returns the messages they complete, in order.
+    public mutating func feed(_ bytes: Data) throws -> [Data] {
+        buffer.append(bytes)
+        var out: [Data] = []
+        while buffer.count >= 4 {
+            let n = buffer.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+            guard n <= limit else { throw TooBig() }
+            guard buffer.count >= 4 + n else { break }
+            out.append(Data(buffer.dropFirst(4).prefix(n)))
+            buffer = Data(buffer.dropFirst(4 + n))
+        }
+        return out
     }
 }
 

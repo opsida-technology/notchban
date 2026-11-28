@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MultipeerConnectivity
+import Network
 import NotchbanCore
 import Security
 import UIKit
@@ -19,6 +20,8 @@ struct PairedMac: Codable {
     var token: Data
     var mac: String
     var name: String
+    /// The Mac's Tailscale address (or name), for reaching it away from home; sent by the Mac or typed by the owner.
+    var remote: String?
 }
 
 /// How a command went: the id of an added card, or a sentence to show.
@@ -42,9 +45,10 @@ struct Queued: Codable, Identifiable, Equatable {
     var seen: Int?
 }
 
-/// The phone's side of the link: finds the paired Mac nearby (MultipeerConnectivity, encryption required), keeps the
-/// last snapshot on disk, and sends the owner's commands. Review verdicts wait on the phone when the Mac is away
-/// and go when it is back; every other command needs the Mac nearby.
+/// The phone's side of the link: finds the paired Mac nearby (MultipeerConnectivity, encryption required) or, when
+/// it is not, over Tailscale (TCP to the Mac's Tailscale address, the same proofs and seal). Keeps the last snapshot
+/// on disk and sends the owner's commands. Review verdicts wait on the phone when the Mac is out of reach and go when
+/// it is back; every other command needs the Mac.
 @MainActor
 final class Link: NSObject, ObservableObject {
     enum State { case searching, connecting, connected }
@@ -72,6 +76,13 @@ final class Link: NSObject, ObservableObject {
     private var waiting: [UUID: CheckedContinuation<Outcome, Never>] = [:]
     /// Set once this session's Mac proved the token over its one-time key: snapshots and results come only sealed in it.
     private var channel: Channel?
+    /// The TCP link over Tailscale, while one is up or being made; nil while the link is nearby or there is none.
+    private var far: NWConnection?
+    private var frames = Frames(limit: 16 << 20)
+    /// Nearby comes first: Tailscale is tried once the browser has had a moment, and not more than every 20 s.
+    private var browsed = Date()
+    private var dialed = Date.distantPast
+    private var retry: Timer?
 
     private static let cache = URL.applicationSupportDirectory.appending(path: "snapshot.json")
     private static let queueFile = URL.applicationSupportDirectory.appending(path: "queue.json")
@@ -83,11 +94,15 @@ final class Link: NSObject, ObservableObject {
         snapshot = (try? Data(contentsOf: Self.cache)).flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
         queued = (try? Data(contentsOf: Self.queueFile)).flatMap { try? JSONDecoder().decode([Queued].self, from: $0) } ?? []
         browse()
+        retry = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconnect() }
+        }
         #if DEBUG
         // for testing against a debug Mac build in the simulator, which has no camera
         if paired == nil, let text = ProcessInfo.processInfo.environment["NOTCHBAN_PAIR_LINK"], let offer = PairingOffer(link: text) {
             pair(offer)
         }
+        if paired != nil, let host = ProcessInfo.processInfo.environment["NOTCHBAN_FAR"] { setRemote(host) }
         #endif
     }
 
@@ -104,6 +119,9 @@ final class Link: NSObject, ObservableObject {
         b.delegate = self
         b.startBrowsingForPeers()
         browser = b
+        browsed = Date()
+        dialed = .distantPast  // back at the front: try Tailscale soon, if the Mac is not nearby
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in self?.reconnect() }
     }
 
     // MARK: pairing
@@ -126,8 +144,25 @@ final class Link: NSObject, ObservableObject {
         saveQueue()
         session?.disconnect()
         session = nil
+        far?.cancel()
+        far = nil
         state = .searching
         browse()
+    }
+
+    /// The Mac's Tailscale address, typed by the owner; empty clears it.
+    func setRemote(_ text: String) {
+        guard var record = paired else { return }
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        record.remote = value.isEmpty ? nil : value
+        keep(record)
+        dialed = .distantPast
+        reconnect()
+    }
+
+    private func keep(_ record: PairedMac) {
+        guard record.remote != paired?.remote || paired == nil else { return }
+        if MacKeychain.save(record) == nil { paired = record }
     }
 
     private func invite(_ peer: MCPeerID, _ invitation: Invitation) {
@@ -147,11 +182,83 @@ final class Link: NSObject, ObservableObject {
         }
     }
 
-    /// The Mac being paired with, or the paired one, if it is in reach.
+    /// The Mac being paired with, or the paired one: nearby if it is, else over Tailscale.
     private func reconnect() {
-        guard let secret, state == .searching,
-              let peer = macs.first(where: { $0.value == secret.mac })?.key else { return }
+        guard let secret, state == .searching else { return }
+        guard let peer = macs.first(where: { $0.value == secret.mac })?.key else { return dial() }
         invite(peer, Invitation.paired(device: secret.device, name: me.displayName, token: secret.token))
+    }
+
+    /// Away from home: a TCP connection to the Mac's Tailscale address. Its first message is the same signed
+    /// invitation as nearby; the Mac then sends its challenge. Pairing itself needs the QR code, so never this way.
+    private func dial() {
+        guard state == .searching, pairing == nil, let paired, let host = paired.remote,
+              Date().timeIntervalSince(browsed) > 3, Date().timeIntervalSince(dialed) > 19,
+              let port = NWEndpoint.Port(rawValue: Wire.port),
+              let context = try? JSONEncoder().encode(Invitation.paired(device: paired.device, name: me.displayName, token: paired.token))
+        else { return }
+        dialed = Date()
+        let c = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
+        far = c
+        frames = Frames(limit: 16 << 20)
+        channel = nil
+        state = .connecting
+        c.stateUpdateHandler = { [weak self] new in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.far === c else { return }
+                    switch new {
+                    case .ready: c.send(content: Frames.wrap(context), completion: .contentProcessed { _ in })
+                    case .waiting, .failed: c.cancel()  // no route (Tailscale off) or refused: try again later
+                    case .cancelled: self.dropped(c)
+                    default: break
+                    }
+                }
+            }
+        }
+        c.start(queue: .main)
+        read(c)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.far === c, self.state == .connecting else { return }
+            c.cancel()
+        }
+    }
+
+    private func read(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { [weak self] data, _, done, error in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.far === c else { return }
+                    if let data, !data.isEmpty {
+                        guard let messages = try? self.frames.feed(data) else { return c.cancel() }
+                        for message in messages where self.far === c { self.handle(message, from: self.paired?.name ?? "Mac") }
+                    }
+                    if done || error != nil { c.cancel() } else if self.far === c { self.read(c) }
+                }
+            }
+        }
+    }
+
+    private func dropped(_ c: NWConnection) {
+        guard far === c else { return }
+        far = nil
+        lost()
+    }
+
+    /// Sends on whichever link is up.
+    private func transmit(_ data: Data) throws {
+        if let session, !session.connectedPeers.isEmpty {
+            try session.send(data, toPeers: session.connectedPeers, with: .reliable)
+        } else if let far {
+            far.send(content: Frames.wrap(data), completion: .contentProcessed { _ in })
+        } else {
+            throw URLError(.networkConnectionLost)
+        }
+    }
+
+    private func hangUp() {
+        session?.disconnect()
+        far?.cancel()
     }
 
     /// What this phone proves, and to which Mac: the scanned code's token while pairing, else the paired one's.
@@ -160,17 +267,35 @@ final class Link: NSObject, ObservableObject {
         return paired.map { ($0.device, $0.token, $0.mac) }
     }
 
+    /// Pull to refresh: the Mac sends its boards whenever a session comes up, so drop this one and let it return.
+    /// Waits (at most 10 s) for the boards to arrive, so the spinner means something.
+    func refresh() async {
+        let before = snapshot?.at
+        dialed = .distantPast
+        if let s = session, let peer = s.connectedPeers.first {
+            s.disconnect(); changed(s, peer, .notConnected)
+        } else if let c = far {
+            c.cancel(); dropped(c)
+        } else {
+            reconnect()
+        }
+        for _ in 0..<40 {
+            if isConnected, snapshot?.at != before { return }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+    }
+
     // MARK: commands
 
     /// Sends a command and waits for the Mac's answer (at most 15 s).
     func run(_ command: BoardCommand) async -> Outcome {
         let id = UUID()
-        guard let session, isConnected, var channel, let message = try? channel.seal(.command(id: id, command)) else {
-            return Outcome(error: "Your Mac isn't nearby. Try again when it is.", retry: true)
+        guard isConnected, var channel, let message = try? channel.seal(.command(id: id, command)) else {
+            return Outcome(error: "Your Mac isn't in reach. Try again when it is.", retry: true)
         }
         self.channel = channel
         do {
-            try session.send(message, toPeers: session.connectedPeers, with: .reliable)
+            try transmit(message)
         } catch {
             return Outcome(error: "Couldn't reach your Mac: \(error.localizedDescription)", retry: true)
         }
@@ -232,6 +357,10 @@ final class Link: NSObject, ObservableObject {
     private func found(_ peer: MCPeerID, mac: String?, by b: MCNearbyServiceBrowser) {
         // a peer found by a browser since replaced cannot be invited through the new one
         guard let mac, b === browser else { return }
+        #if DEBUG
+        // NOTCHBAN_FAR=<host>: a paired simulator ignores the Mac nearby, to test the Tailscale path on the same machine
+        if paired != nil, ProcessInfo.processInfo.environment["NOTCHBAN_FAR"] != nil { return }
+        #endif
         macs[peer] = mac
         if paired == nil, !nearby.contains(peer) { nearby.append(peer) }
         reconnect()
@@ -251,38 +380,50 @@ final class Link: NSObject, ObservableObject {
             state = .connecting
         case .notConnected:
             session = nil
-            channel = nil
-            state = .searching
-            for (_, c) in waiting { c.resume(returning: Outcome(error: "The link to your Mac dropped. Check the board before trying again.", retry: true)) }
-            waiting = [:]
-            if pairing != nil {
-                pairing = nil
-                pairingError = "Your Mac didn't accept that code. Show a new one on the Mac and scan it again."
-            }
-            // the Mac may have only blinked: try again shortly, while it is still found
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reconnect() }
+            lost()
         @unknown default:
             break
         }
     }
 
+    /// The link went, whichever it was: the commands waiting on it get their answer, and the Mac is looked for again.
+    private func lost() {
+        channel = nil
+        state = .searching
+        for (_, c) in waiting { c.resume(returning: Outcome(error: "The link to your Mac dropped. Check the board before trying again.", retry: true)) }
+        waiting = [:]
+        if pairing != nil {
+            pairing = nil
+            pairingError = "Your Mac didn't accept that code. Show a new one on the Mac and scan it again."
+        }
+        // the Mac may have only blinked: try again shortly, while it is still found
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.reconnect() }
+    }
+
     private func received(_ data: Data, from peer: MCPeerID, in s: MCSession) {
         guard s === session else { return }
+        handle(data, from: peer.displayName)
+    }
+
+    private func handle(_ data: Data, from name: String) {
         if var channel {
             // anything that does not open as the Mac's next sealed message ends the link
-            guard let message = try? channel.open(data) else { return s.disconnect() }
+            guard let message = try? channel.open(data) else { return hangUp() }
             self.channel = channel
             switch message {
-            case let .snapshot(boards, at, ears):
+            case let .snapshot(boards, at, ears, remote):
                 if let pairing {  // the Mac proved the scanned token in this session: keep the pairing
-                    let record = PairedMac(device: pairing.device, token: pairing.offer.token, mac: pairing.offer.mac, name: peer.displayName)
+                    let record = PairedMac(device: pairing.device, token: pairing.offer.token, mac: pairing.offer.mac, name: name, remote: remote)
                     if let failure = MacKeychain.save(record) {
                         pairingError = "Couldn't keep the pairing in the Keychain (\(failure))."
-                        return s.disconnect()
+                        return hangUp()
                     }
                     paired = record
                     self.pairing = nil
                     nearby = []
+                } else if let remote, var record = paired, record.remote != remote {
+                    record.remote = remote  // the Mac's own word beats a typed one: it knows its address
+                    keep(record)
                 }
                 state = .connected
                 let fresh = Snapshot(boards: boards, at: at, ears: ears)
@@ -306,15 +447,15 @@ final class Link: NSObject, ObservableObject {
             // channel no one relaying between them can read or change.
             guard let current = secret, Wire.verify(sessionProof: proof, token: current.token, role: "mac",
                                                     device: current.device, nonce: nonce, keys: macKey)
-            else { return s.disconnect() }
+            else { return hangUp() }
             let own = Curve25519.KeyAgreement.PrivateKey(), phoneKey = own.publicKey.rawRepresentation
             guard let channel = try? Channel(role: "phone", own: own, mac: macKey, phone: phoneKey, token: current.token,
                                              device: current.device, nonce: nonce),
                   let answer = try? WireMessage.answer(key: phoneKey, proof: Wire.sessionProof(
                       token: current.token, role: "phone", device: current.device, nonce: nonce, keys: macKey + phoneKey)).encoded()
-            else { return s.disconnect() }
+            else { return hangUp() }
             self.channel = channel
-            try? s.send(answer, toPeers: [peer], with: .reliable)
+            try? transmit(answer)
         default:
             break  // nothing else is taken before the channel is set up
         }

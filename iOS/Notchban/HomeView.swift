@@ -134,16 +134,7 @@ struct HomeView: View {
             gone = gone.filter(still.contains)
         }
         .toast($message)
-        .islandPrompt(isPresented: $forgetting) {
-            Text("Forget \(link.paired?.name ?? "this Mac")?").font(Theme.font(24, .bold))
-            Text("The boards on this phone are removed. To use the Mac again, pair with a new code.")
-                .font(Theme.body).foregroundStyle(Theme.onNotch2)
-            HStack(spacing: 10) {
-                Button("Forget") { forgetting = false; link.forget() }.buttonStyle(IslandCapsuleStyle(tint: Theme.late.text))
-                Button("Keep") { forgetting = false }.buttonStyle(WhiteCapsuleStyle())
-            }
-            .padding(.top, 4)
-        }
+        .islandPrompt(isPresented: $forgetting) { MacBox { forgetting = false } }
     }
 
     // MARK: also needs you
@@ -250,7 +241,7 @@ struct HomeView: View {
             HStack(spacing: 10) {
                 Button { forgetting = true } label: { LivePill(opens: true) }
                     .buttonStyle(.plain)
-                    .accessibilityHint("Opens the option to forget this Mac")
+                    .accessibilityHint("Opens this Mac's settings")
                 Spacer()
                 IconButton(systemImage: searching ? "xmark" : "magnifyingglass", label: searching ? "Close search" : "Search cards") {
                     searching.toggle()
@@ -792,5 +783,53 @@ private struct AlsoNeeds: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Theme.surface))
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The paired Mac: its Tailscale address, for reaching it away from home, and forgetting it.
+struct MacBox: View {
+    let close: () -> Void
+    @EnvironmentObject var link: Link
+    @State private var address = ""
+    @State private var confirming = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if confirming {
+                Text("Forget \(link.paired?.name ?? "this Mac")?").font(Theme.font(24, .bold))
+                Text("The boards on this phone are removed. To use the Mac again, pair with a new code.")
+                    .font(Theme.body).foregroundStyle(Theme.onNotch2)
+                HStack(spacing: 10) {
+                    Button("Forget") { close(); link.forget() }.buttonStyle(IslandCapsuleStyle(tint: Theme.late.text))
+                    Button("Keep") { confirming = false }.buttonStyle(WhiteCapsuleStyle())
+                }
+            } else {
+                Text(link.paired?.name ?? "Your Mac").font(Theme.font(22, .bold))
+                TextField("", text: $address, prompt: Text("100.x.y.z or Mac name").foregroundStyle(Theme.onNotch2))
+                    .focused($focused)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .onSubmit(save)
+                    .font(Theme.font(17, .semibold))
+                    .inputBox(focused: focused)
+                    .accessibilityLabel("Tailscale address of your Mac")
+                Text("Away from home, the phone reaches the Mac over Tailscale at this address. Turn on \u{201C}Reach the iPhone over Tailscale\u{201D} in the Mac's board menu; it then fills this in itself.")
+                    .font(Theme.font(13)).foregroundStyle(Theme.onNotch2)
+                HStack(spacing: 10) {
+                    Button("Forget Mac…") { confirming = true }.buttonStyle(IslandCapsuleStyle(tint: Theme.late.text))
+                    Spacer()
+                    Button("Done", action: save).buttonStyle(WhiteCapsuleStyle())
+                }
+            }
+        }
+        .onAppear { address = link.paired?.remote ?? "" }
+    }
+
+    private func save() {
+        if address != (link.paired?.remote ?? "") { link.setRemote(address) }
+        close()
     }
 }
