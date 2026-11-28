@@ -414,8 +414,8 @@ final class Link: NSObject, ObservableObject {
             self.channel = channel
             switch message {
             case let .snapshot(boards, at, ears, remote):
-                if let pairing {  // the Mac proved the scanned token in this session: keep the pairing
-                    let record = PairedMac(device: pairing.device, token: pairing.offer.token, mac: pairing.offer.mac, name: name, remote: remote)
+                if let pairing {  // the Mac proved the scanned token in this session: keep the pairing, under this session's key
+                    let record = PairedMac(device: pairing.device, token: channel.paired, mac: pairing.offer.mac, name: name, remote: remote)
                     if let failure = MacKeychain.save(record) {
                         pairingError = "Couldn't keep the pairing in the Keychain (\(failure))."
                         return hangUp()

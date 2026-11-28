@@ -270,7 +270,8 @@ final class Pairing: NSObject, ObservableObject {
     /// The link checks out: it gets snapshots and may send commands, all sealed in `channel`.
     private func open(_ key: AnyHashable, _ channel: Channel) {
         guard var link = links[key] else { return }
-        if let token = link.pairing {
+        if link.pairing != nil {
+            let token = channel.paired  // not the code's token: that one may have travelled as a pasted link
             if let failure = PhoneKeychain.save(token, for: link.device) {
                 status = "Couldn't keep the pairing in the Keychain (\(failure)). Show a new code to try again."
                 return drop(key)
@@ -553,8 +554,10 @@ struct PairView: View {
                 Text("It works once, for two minutes.").font(.callout).foregroundStyle(.secondary)
                 if offer.remote != nil {
                     Button("Copy Link to Pair over Tailscale") {
+                        // marked concealed, so clipboard managers do not keep it
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(offer.link, forType: .string)
+                        NSPasteboard.general.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
                     }
                     .buttonStyle(.link).font(.callout)
                     .help("For a phone away from home: paste the link on its pairing screen. Send it only to yourself.")

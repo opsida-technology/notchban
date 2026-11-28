@@ -97,6 +97,16 @@ final class WireTests: XCTestCase {
         XCTAssertEqual(try phone.open(mac.seal(result)), result, "the second one opens under the next number")
     }
 
+    func testAPairingKeepsAKeyOfItsOwnNotTheCodesToken() throws {
+        let token = Wire.newToken()
+        let (mac, phone) = try XCTUnwrap(handshake(token: token))
+        XCTAssertEqual(mac.paired, phone.paired, "both ends keep the same key")
+        XCTAssertEqual(mac.paired.count, 32)
+        XCTAssertNotEqual(mac.paired, token, "a code seen later is worth nothing")
+        let again = try XCTUnwrap(handshake(token: token))
+        XCTAssertNotEqual(again.mac.paired, mac.paired, "it comes from the session's one-time keys")
+    }
+
     func testARelayCannotSwapKeysReadReplayOrReflect() throws {
         XCTAssertNil(try handshake(token: Wire.newToken(), swapMacKey: true), "the Mac's proof does not cover the relay's key")
 

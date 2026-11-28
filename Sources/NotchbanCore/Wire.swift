@@ -185,6 +185,10 @@ public struct PairingOffer: Equatable, Sendable {
 public struct Channel: Sendable {
     private let out: SymmetricKey
     private let inbound: SymmetricKey
+    /// What both ends keep when this session completes a pairing, in place of the code's token: it comes from this
+    /// session's one-time keys too, so a pairing code seen later (a pasted link left in a chat or a clipboard) is
+    /// worth nothing once it was used.
+    public let paired: Data
     private var sent: UInt64 = 0
     private var received: UInt64 = 0
 
@@ -200,6 +204,7 @@ public struct Channel: Sendable {
         }
         out = key(role == "mac" ? "mac>phone" : "phone>mac")
         inbound = key(role == "mac" ? "phone>mac" : "mac>phone")
+        paired = key("paired").withUnsafeBytes { Data($0) }
     }
 
     public mutating func seal(_ message: WireMessage) throws -> Data {
