@@ -4,7 +4,7 @@ import SwiftUI
 import VisionKit
 
 /// First run: scan the QR code the Mac shows. It carries the pairing token from the Mac's screen to the camera, so the
-/// token never goes over the air.
+/// token never goes over the air. Away from home, the owner can paste the code's link instead and pair over Tailscale.
 struct PairView: View {
     @EnvironmentObject var link: Link
     @State private var scanning = false
@@ -28,6 +28,18 @@ struct PairView: View {
                 .buttonStyle(WhiteCapsuleStyle())
                 .disabled(link.state == .connecting)
                 .padding(.top, 2)
+                HStack(spacing: 10) {
+                    Text("Away from home? Paste the code's link to pair over Tailscale.")
+                        .font(Theme.font(13)).foregroundStyle(Theme.onNotch2)
+                    Spacer(minLength: 0)
+                    PasteButton(payloadType: String.self) { texts in
+                        Task { @MainActor in paste(texts.first ?? "") }
+                    }
+                    .labelStyle(.titleOnly)
+                    .buttonBorderShape(.capsule)
+                    .tint(Theme.onNotch2)
+                    .disabled(link.state == .connecting)
+                }
             }
             .padding(18)
             .floatingIsland(radius: 34)
@@ -87,6 +99,15 @@ struct PairView: View {
             Text(text).font(Theme.body).foregroundStyle(Theme.fg2)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private func paste(_ text: String) {
+        problem = nil
+        guard let offer = PairingOffer(link: text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            problem = "That isn't a pairing link. Copy the whole link, from notchban:pair to its end."
+            return
+        }
+        link.pair(offer)
     }
 
     private func scan() {

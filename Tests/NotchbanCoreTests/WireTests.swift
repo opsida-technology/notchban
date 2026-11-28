@@ -130,6 +130,10 @@ final class WireTests: XCTestCase {
         XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)&token=AAAA"), "a short token")
         XCTAssertNil(PairingOffer(link: "notchban:pair?mac=\(mac)"))
         XCTAssertNil(PairingOffer(link: "123456"))
+        let far = PairingOffer(mac: mac, token: Wire.newToken(), remote: "100.64.1.2")
+        XCTAssertEqual(PairingOffer(link: far.link), far, "the Tailscale address travels with the code")
+        XCTAssertNil(PairingOffer(link: good + "&at=evil.example/../x"), "a host is a host")
+        XCTAssertNil(PairingOffer(link: good + "&at="), "an empty host")
     }
 
     func testFramesSurviveAnySplitAndRefuseOversizedMessages() throws {

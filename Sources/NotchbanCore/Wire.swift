@@ -140,21 +140,28 @@ public struct Frames: Sendable {
     }
 }
 
-/// What the Mac's pairing QR code holds: the Mac's id and a fresh token. The token goes from the Mac's screen to the
-/// phone's camera and never over the air, so no one nearby can learn it, even while the two pair.
+/// What the Mac's pairing QR code holds: the Mac's id and a fresh token, and its Tailscale address while it takes
+/// phones that way. Scanned, the token goes from the Mac's screen to the phone's camera and never over the air. The
+/// owner can also paste the link on a phone away from home, to pair over Tailscale: it is still good once, briefly.
 public struct PairingOffer: Equatable, Sendable {
     public var mac: String
     public var token: Data
+    public var remote: String?
 
-    public init(mac: String, token: Data) {
-        self.mac = mac; self.token = token
+    public init(mac: String, token: Data, remote: String? = nil) {
+        self.mac = mac; self.token = token; self.remote = remote
     }
 
-    /// `notchban:pair?mac=<id>&token=<base64url>`
+    /// `notchban:pair?mac=<id>&token=<base64url>[&at=<tailscale address>]`
     public var link: String {
         let token = token.base64EncodedString().replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-        return "notchban:pair?mac=\(mac)&token=\(token)"
+        return "notchban:pair?mac=\(mac)&token=\(token)" + (remote.map { "&at=\($0)" } ?? "")
+    }
+
+    /// A host the phone may dial: an IP address or a name, nothing else.
+    public static func isHost(_ text: String) -> Bool {
+        (1...253).contains(text.count) && text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || ".-:".contains($0)) }
     }
 
     /// Reads a scanned code; nil for anything that is not a well-formed pairing link.
@@ -165,7 +172,9 @@ public struct PairingOffer: Equatable, Sendable {
         text = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         text += String(repeating: "=", count: (4 - text.count % 4) % 4)
         guard let token = Data(base64Encoded: text), token.count == 32 else { return nil }
-        self.init(mac: mac, token: token)
+        let remote = parts.queryItems?.first(where: { $0.name == "at" })?.value
+        if let remote, !Self.isHost(remote) { return nil }
+        self.init(mac: mac, token: token, remote: remote)
     }
 }
 

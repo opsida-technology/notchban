@@ -111,7 +111,9 @@ Mac, which writes them into the `KANBAN.md` like any other edit of yours.
   is sealed (ChaChaPoly), so nobody nearby can read, change or replay it.
 - **Away from home, over Tailscale** (optional): with Tailscale on both, turn on board menu › Reach the iPhone over
   Tailscale. The Mac then listens on its Tailscale address only (TCP 47621) and takes paired phones only, with the
-  same proofs and seal; the phone uses it whenever the Mac is not nearby. Pairing still needs the QR code.
+  same proofs and seal; the phone uses it whenever the Mac is not nearby. To pair from afar, copy the link under
+  the QR code (Copy Link to Pair over Tailscale), get it to the phone and tap Paste on its pairing screen: it pairs over Tailscale, once, within the two
+  minutes. Anyone who sees that link in those two minutes could pair instead, so send it only to yourself.
 - **Verdicts**: swipe the card (right approves, left asks for changes, up is done, down holds). A verdict waits
   five seconds with an Undo bar before it is sent.
 - **Projects and boards**: on the home screen a project dial (a ticked arc you turn) filters the cards that need you. Turn the phone sideways on a board and it lies down as one kanban row, empty columns folded to rails; tap a card for its sheet with the verdict buttons.

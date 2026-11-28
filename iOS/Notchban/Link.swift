@@ -130,6 +130,7 @@ final class Link: NSObject, ObservableObject {
     func pair(_ offer: PairingOffer) {
         pairing = (UUID().uuidString, offer)
         pairingError = nil
+        dialed = .distantPast
         reconnect()
     }
 
@@ -190,12 +191,13 @@ final class Link: NSObject, ObservableObject {
     }
 
     /// Away from home: a TCP connection to the Mac's Tailscale address. Its first message is the same signed
-    /// invitation as nearby; the Mac then sends its challenge. Pairing itself needs the QR code, so never this way.
+    /// invitation as nearby, the paired token's or, while pairing from a pasted link, the code's; the Mac then sends
+    /// its challenge.
     private func dial() {
-        guard state == .searching, pairing == nil, let paired, let host = paired.remote,
+        guard state == .searching, let secret, let host = pairing?.offer.remote ?? paired?.remote,
               Date().timeIntervalSince(browsed) > 3, Date().timeIntervalSince(dialed) > 19,
               let port = NWEndpoint.Port(rawValue: Wire.port),
-              let context = try? JSONEncoder().encode(Invitation.paired(device: paired.device, name: me.displayName, token: paired.token))
+              let context = try? JSONEncoder().encode(Invitation.paired(device: secret.device, name: me.displayName, token: secret.token))
         else { return }
         dialed = Date()
         let c = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
@@ -358,8 +360,8 @@ final class Link: NSObject, ObservableObject {
         // a peer found by a browser since replaced cannot be invited through the new one
         guard let mac, b === browser else { return }
         #if DEBUG
-        // NOTCHBAN_FAR=<host>: a paired simulator ignores the Mac nearby, to test the Tailscale path on the same machine
-        if paired != nil, ProcessInfo.processInfo.environment["NOTCHBAN_FAR"] != nil { return }
+        // NOTCHBAN_FAR=<host>: the simulator ignores the Mac nearby, to test the Tailscale path on the same machine
+        if ProcessInfo.processInfo.environment["NOTCHBAN_FAR"] != nil { return }
         #endif
         macs[peer] = mac
         if paired == nil, !nearby.contains(peer) { nearby.append(peer) }

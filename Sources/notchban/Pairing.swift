@@ -134,13 +134,18 @@ final class Pairing: NSObject, ObservableObject {
 
     /// A fresh QR code, good once, for two minutes.
     func open() {
-        offer = PairingOffer(mac: macID, token: Wire.newToken())
+        offer = PairingOffer(mac: macID, token: Wire.newToken(), remote: address)
         status = "Waiting for your iPhone…"
         advertise()
         expiry?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.close("The code ran out. Show a new one to pair.") }
         expiry = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: work)
+        var seconds = 120.0
+        #if DEBUG
+        // NOTCHBAN_PAIR_SECONDS: a longer code, for pairing a phone by hand from a debug build
+        if let text = ProcessInfo.processInfo.environment["NOTCHBAN_PAIR_SECONDS"], let n = Double(text) { seconds = n }
+        #endif
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     func close(_ message: String = "") {
@@ -181,7 +186,7 @@ final class Pairing: NSObject, ObservableObject {
     // MARK: invitations
 
     private func invited(_ peer: MCPeerID, _ invitation: Invitation?, _ answer: @escaping (Bool, MCSession?) -> Void) {
-        guard let invitation, let pairing = admit(invitation, pairing: true) else { return answer(false, nil) }
+        guard let invitation, let pairing = admit(invitation) else { return answer(false, nil) }
         links[peer]?.pipe.close()
         let session = MCSession(peer: me, securityIdentity: nil, encryptionPreference: .required)
         session.delegate = self
@@ -190,9 +195,9 @@ final class Pairing: NSObject, ObservableObject {
         answer(true, session)
     }
 
-    /// Checks a fresh proof, spent once: a paired phone's token (the answer is empty), or, when `pairing` is allowed,
-    /// the open QR code's (the answer is that token, now used up). Nil turns the phone away.
-    private func admit(_ invitation: Invitation, pairing: Bool) -> Data? {
+    /// Checks a fresh proof, spent once: a paired phone's token (the answer is empty), or the open pairing code's (the
+    /// answer is that token, now used up). Nil turns the phone away.
+    private func admit(_ invitation: Invitation) -> Data? {
         let now = Date()
         spent = spent.filter { now.timeIntervalSince($0.value) < TimeInterval(Wire.skew * 2) }
         guard let proof = invitation.proof, spent[proof] == nil else { return nil }
@@ -200,8 +205,8 @@ final class Pairing: NSObject, ObservableObject {
             guard let token = token(for: invitation.device), Wire.verify(invitation, token: token, now: now) else { return nil }
             spent[proof] = now
             return Data()
-        } else if pairing, let offer, Wire.verify(invitation, token: offer.token, now: now) {
-            // only a phone that read the QR code can sign with its token
+        } else if let offer, Wire.verify(invitation, token: offer.token, now: now) {
+            // only a phone that read the code (scanned, or its link pasted) can sign with its token
             spent[proof] = now
             self.offer = nil  // good once
             expiry?.cancel()
@@ -379,8 +384,8 @@ final class Pairing: NSObject, ObservableObject {
         listener = l
     }
 
-    /// A knock on the Tailscale port. Its first message must be a paired phone's invitation, small and within 10 s;
-    /// pairing itself needs the QR code on this screen, so it never happens this way.
+    /// A knock on the Tailscale port. Its first message must be an invitation, small and within 10 s: a paired phone's,
+    /// or one signed with the open pairing code (the owner pasted its link on a phone away from home).
     private func arrived(_ connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         frames[id] = Frames(limit: 4_096)
@@ -424,8 +429,9 @@ final class Pairing: NSObject, ObservableObject {
         let id = ObjectIdentifier(connection)
         guard links[id] == nil else { return handle(data, from: id) }
         guard let invitation = try? JSONDecoder().decode(Invitation.self, from: data),
-              admit(invitation, pairing: false) != nil else { return connection.cancel() }
-        links[id] = Link(pipe: .far(connection), device: invitation.device, name: String(invitation.name.prefix(60)), pairing: nil)
+              let pairing = admit(invitation) else { return connection.cancel() }
+        links[id] = Link(pipe: .far(connection), device: invitation.device, name: String(invitation.name.prefix(60)),
+                         pairing: pairing.isEmpty ? nil : pairing)
         frames[id]?.limit = 1 << 20  // a proved phone: its commands, never more than a note's length
         challenge(id)
     }
@@ -545,6 +551,14 @@ struct PairView: View {
                     .padding(14).background(Color.white, in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityLabel("Pairing QR code")
                 Text("It works once, for two minutes.").font(.callout).foregroundStyle(.secondary)
+                if offer.remote != nil {
+                    Button("Copy Link to Pair over Tailscale") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(offer.link, forType: .string)
+                    }
+                    .buttonStyle(.link).font(.callout)
+                    .help("For a phone away from home: paste the link on its pairing screen. Send it only to yourself.")
+                }
             } else {
                 Button("Show a Pairing Code") { pairing.open() }.controlSize(.large).keyboardShortcut(.defaultAction)
             }
